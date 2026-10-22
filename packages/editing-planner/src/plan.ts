@@ -1,6 +1,7 @@
 import type { Intensity, JobSettings, LibraryIndex, TranscriptWord } from '@clipper/shared';
 import { resolveLibraryFile, type LibraryKind } from '@clipper/shared/server';
 import type { ClipEdit, Overlay, Sfx, Shot, Zoom } from './schemas';
+import { findAssetsByKeywords, matchAssetByName } from './library-select';
 
 // ---------------- Limites por intensidade ----------------
 
@@ -174,11 +175,6 @@ function seededRandom(seed: string) {
   };
 }
 
-function pickCategory(lib: LibraryIndex, kind: LibraryKind, preferred: string[]): string | null {
-  const nonEmpty = lib[kind].filter((c) => c.files.length);
-  for (const p of preferred) if (nonEmpty.some((c) => c.name === p)) return p;
-  return nonEmpty[0]?.name ?? null;
-}
 
 export function heuristicEdit(args: {
   clipIndex: number;
@@ -214,46 +210,57 @@ export function heuristicEdit(args: {
     });
   }
 
-  // Memes + sons em picos de humor/surpresa
+  // Memes + sons em picos de humor/surpresa — escolhidos pelo NOME do arquivo (funciona com pasta única)
   const overlays: Overlay[] = [];
   const sfx: Sfx[] = [];
-  const memeCatHumor = pickCategory(library, 'memes', ['humor', 'reacoes']);
-  const memeCatShock = pickCategory(library, 'memes', ['choque', 'reacoes', 'humor']);
-  const sfxLaugh = pickCategory(library, 'audio', ['risadas', 'impacto']);
-  const sfxImpact = pickCategory(library, 'audio', ['impacto', 'transicao']);
-  const sfxTransition = pickCategory(library, 'audio', ['transicao', 'impacto']);
+  const used = new Set<string>();
+  const choose = (kind: LibraryKind, keywords: string[]): { category: string; file: string } | null => {
+    const found = findAssetsByKeywords(library, kind, keywords).filter((a) => !used.has(a.file));
+    if (!found.length) return null;
+    const top = found.slice(0, 6);
+    const pick = top[Math.floor(rnd() * top.length)];
+    used.add(pick.file);
+    return pick;
+  };
+  const LAUGH_KEYS = ['laugh', 'laughing', 'lol', 'haha', 'funny', 'risada', 'risadas', 'humor', 'kkk'];
+  const SHOCK_KEYS = ['shocked', 'shock', 'wow', 'omg', 'surprised', 'what', 'choque', 'reacoes', 'dramatic'];
+  const IMPACT_KEYS = ['boom', 'vine', 'impact', 'hit', 'bruh', 'impacto', 'ding'];
+  const TRANSITION_KEYS = ['whoosh', 'swoosh', 'transition', 'transicao', 'woosh'];
   const positions: Overlay['position'][] = ['top', 'top-right', 'top-left', 'center'];
 
   for (const w of words) {
     const word = clean(w.word);
     const kind = LAUGH.test(word) ? 'humor' : SURPRISE.test(word) || /\?!|!\?/.test(w.word) ? 'shock' : null;
     if (!kind) continue;
-    const cat = kind === 'humor' ? memeCatHumor : memeCatShock;
-    if (cat && intensity !== 'low') {
+    const meme = intensity !== 'low' ? choose('memes', kind === 'humor' ? LAUGH_KEYS : SHOCK_KEYS) : null;
+    if (meme) {
       overlays.push({
         type: 'meme',
-        category: cat,
-        file: null,
+        category: meme.category,
+        file: meme.file,
         at: w.start,
         duration: 1.6,
         position: positions[overlays.length % (intensity === 'high' ? 4 : 2)],
         scale: intensity === 'high' ? 0.55 : 0.45,
+        audioMode: 'both',
       });
     }
-    const sCat = kind === 'humor' ? sfxLaugh : sfxImpact;
-    if (sCat) sfx.push({ category: sCat, file: null, at: w.start, volume: 0.7 });
+    const snd = choose('audio', kind === 'humor' ? LAUGH_KEYS : IMPACT_KEYS);
+    if (snd) sfx.push({ category: snd.category, file: snd.file, at: w.start, volume: 0.7 });
   }
-  if (intensity !== 'low' && sfxTransition) sfx.unshift({ category: sfxTransition, file: null, at: 0, volume: 0.6 });
-  if (intensity === 'high' && sfxImpact) {
-    for (const z of zooms.filter((_, i) => i % 3 === 1)) sfx.push({ category: sfxImpact, file: null, at: z.at, volume: 0.45 });
-  }
-  // Pergunta → reação (alta intensidade)
-  if (intensity === 'high' && memeCatShock) {
+  const whoosh = intensity !== 'low' ? choose('audio', TRANSITION_KEYS) : null;
+  if (whoosh) sfx.unshift({ category: whoosh.category, file: whoosh.file, at: 0, volume: 0.6 });
+  if (intensity === 'high') {
+    for (const z of zooms.filter((_, i) => i % 3 === 1)) {
+      const hit = choose('audio', IMPACT_KEYS);
+      if (hit) sfx.push({ category: hit.category, file: hit.file, at: z.at, volume: 0.45 });
+    }
+    // Pergunta → reação
     for (const w of words.filter((x) => /\?$/.test(x.word))) {
-      overlays.push({ type: 'meme', category: memeCatShock, file: null, at: w.end, duration: 1.4, position: 'top', scale: 0.5 });
+      const r = choose('memes', SHOCK_KEYS);
+      if (r) overlays.push({ type: 'meme', category: r.category, file: r.file, at: w.end, duration: 1.4, position: 'top', scale: 0.5, audioMode: 'both' });
     }
   }
-
   return normalizeEdit(
     { clipIndex: args.clipIndex, zooms, overlays: overlays.sort((a, b) => a.at - b.at), sfx: sfx.sort((a, b) => a.at - b.at), emphasisWords, hashtags: [], shots: [] },
     duration,
@@ -285,28 +292,36 @@ export interface ResolvedEdit {
 }
 
 /**
- * Converte nomes (categoria/arquivo) do plano em caminhos absolutos — somente arquivos que existem
- * no índice escaneado da biblioteca. Arquivo inexistente → sorteia outro da mesma categoria.
+ * Converte o plano em caminhos absolutos — somente arquivos que existem no índice da biblioteca.
+ * Nome exato → usa; nome parecido (IA errou a grafia) → usa o mais próximo; sem correspondência → descarta
+ * (nunca sorteia um meme qualquer para um momento que pediu outro). Sem arquivo (plano heurístico antigo
+ * por categoria) → sorteia dentro da categoria pedida.
  */
 export function resolveEdit(edit: ClipEdit, library: LibraryIndex, seed: string): ResolvedEdit {
   const rnd = seededRandom(seed);
   const warnings: string[] = [];
   const pick = (kind: LibraryKind, category: string, file?: string | null): { file: string; fileName: string; category: string } | null => {
-    let cat = library[kind].find((c) => c.name === category && c.files.length);
-    if (!cat) {
-      const fallback = library[kind].filter((c) => c.files.length);
-      if (!fallback.length) return null;
-      warnings.push(`categoria "${category}" inexistente em ${kind}; usando "${fallback[0].name}"`);
-      cat = fallback[Math.floor(rnd() * fallback.length)];
+    let found: { category: string; file: string } | null = null;
+    if (file) {
+      const exact = library[kind].find((c) => c.name === category && c.files.includes(file)) ?? library[kind].find((c) => c.files.includes(file));
+      if (exact) found = { category: exact.name, file };
+      else {
+        const near = matchAssetByName(library, kind, file);
+        if (near && near.score >= 0.5) {
+          warnings.push(`"${file}" não existe; usando o parecido "${near.file}"`);
+          found = near;
+        } else {
+          warnings.push(`"${file}" não existe em ${kind}; descartado`);
+          return null;
+        }
+      }
+    } else {
+      const cat = library[kind].find((c) => c.name === category && c.files.length);
+      if (!cat) return null;
+      found = { category: cat.name, file: cat.files[Math.floor(rnd() * cat.files.length)] };
     }
-    let name = file && cat.files.includes(file) ? file : null;
-    if (file && !name) warnings.push(`arquivo "${file}" não encontrado em ${kind}/${cat.name}; sorteando outro`);
-    if (!name) {
-      // Arquivos de vídeo/áudio pesados só para memes; images aceita qualquer imagem
-      name = cat.files[Math.floor(rnd() * cat.files.length)];
-    }
-    const full = resolveLibraryFile(library, kind, cat.name, name);
-    return full ? { file: full, fileName: name, category: cat.name } : null;
+    const full = resolveLibraryFile(library, kind, found.category, found.file);
+    return full ? { file: full, fileName: found.file, category: found.category } : null;
   };
 
   const overlays: ResolvedOverlay[] = [];
@@ -330,5 +345,44 @@ export function resolveEdit(edit: ClipEdit, library: LibraryIndex, seed: string)
     description: edit.description,
     hashtags: edit.hashtags ?? [],
     warnings,
+  };
+}
+
+/**
+ * Facecam de live: um rosto PEQUENO que aparece na mesma posição, perto de uma borda/canto, na maioria
+ * dos frames amostrados. Retorna a caixa estimada da câmera (frações do quadro) ou null (IRL, sem cam).
+ */
+export function detectFacecam(framesFaces: { x: number; y: number; w: number; h: number }[][]): { x0: number; y0: number; x1: number; y1: number } | null {
+  const valid = framesFaces.filter((f) => f.length);
+  if (framesFaces.length < 4 || valid.length < framesFaces.length * 0.35) return null;
+  const buckets = new Map<string, { x: number; y: number; w: number; h: number }[]>();
+  for (const faces of framesFaces) {
+    const seen = new Set<string>();
+    for (const f of faces) {
+      if (f.w > 0.16) continue; // rosto grande = câmera principal (IRL/podcast), não facecam
+      const key = `${Math.round(f.x * 8)}:${Math.round(f.y * 8)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      buckets.set(key, [...(buckets.get(key) ?? []), f]);
+    }
+  }
+  const best = [...buckets.values()].sort((a, b) => b.length - a.length)[0];
+  if (!best || best.length < framesFaces.length * 0.4) return null;
+  const med = (k: 'x' | 'y' | 'w' | 'h') => best.map((f) => f[k]).sort((a, b) => a - b)[Math.floor(best.length / 2)];
+  const cx = med('x');
+  const cy = med('y');
+  const fw = med('w');
+  const fh = med('h');
+  const nearEdge = cx < 0.33 || cx > 0.67 || cy < 0.3 || cy > 0.7;
+  if (!nearEdge) return null;
+  // Webcam típica: rosto ocupa ~30% da largura da câmera
+  const w = fw * 3.4;
+  const h = fh * 3.0;
+  const ccy = cy + h * 0.08;
+  return {
+    x0: Math.max(0, cx - w / 2),
+    y0: Math.max(0, ccy - h / 2),
+    x1: Math.min(1, cx + w / 2),
+    y1: Math.min(1, ccy + h / 2),
   };
 }

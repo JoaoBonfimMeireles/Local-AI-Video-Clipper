@@ -4,6 +4,22 @@ export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'can
 export type ClipStatus = 'pending' | 'rendering' | 'completed' | 'failed';
 
 export type Intensity = 'low' | 'medium' | 'high';
+/** youtube: podcasts/entrevistas/vlogs. twitch: lives (jogos, IRL, interação com chat). */
+export type ContentMode = 'youtube' | 'twitch';
+export type TwitchCategory = 'funny' | 'scary' | 'top5' | 'chat' | 'roast' | 'quotes' | 'highlights';
+/** auto: detecta facecam; split: facecam em cima + jogo embaixo; full: enquadramento normal. */
+export type TwitchLayout = 'auto' | 'split' | 'full';
+
+export const TWITCH_CATEGORIES: { key: TwitchCategory; label: string; desc: string }[] = [
+  { key: 'funny', label: 'Mais engraçados', desc: 'risadas, piadas, situações absurdas' },
+  { key: 'scary', label: 'Tensos / assustadores', desc: 'sustos, jumpscares, momentos de tensão' },
+  { key: 'top5', label: 'Top 5 da live', desc: 'compilação com os 5 momentos que mais chamaram atenção' },
+  { key: 'chat', label: 'Interação com o chat', desc: 'respostas a viewers, donates, raids' },
+  { key: 'roast', label: 'Zoeira entre pessoas', desc: 'um zoando o outro, provocações' },
+  { key: 'quotes', label: 'Falas marcantes', desc: 'frases engraçadas, polêmicas ou memoráveis' },
+  { key: 'highlights', label: 'Jogadas e destaques', desc: 'clutches, fails épicos, momentos de skill' },
+];
+
 export type OutputFormat = 'original' | 'vertical_blur' | 'vertical_crop' | 'square';
 export type AiProviderName = 'heuristic' | 'gemini' | 'anthropic' | 'ollama';
 export type WhisperDevice = 'auto' | 'cuda' | 'cpu';
@@ -30,6 +46,10 @@ export interface JobSettings {
   creditTitle: string;
   creditChannel: string;
   creditUrl: string;
+  mode: ContentMode;
+  /** Modo Twitch: quais tipos de momento procurar. */
+  twitchCategories: TwitchCategory[];
+  twitchLayout: TwitchLayout;
 }
 
 /**
@@ -84,6 +104,9 @@ export const DEFAULT_JOB_SETTINGS: JobSettings = {
   creditTitle: '',
   creditChannel: '',
   creditUrl: '',
+  mode: 'youtube',
+  twitchCategories: ['funny', 'scary', 'top5', 'chat', 'roast', 'quotes', 'highlights'],
+  twitchLayout: 'auto',
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {

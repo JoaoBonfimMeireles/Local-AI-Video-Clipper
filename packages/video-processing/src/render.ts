@@ -22,6 +22,11 @@ export interface RenderOverlay {
   scale: number;
   hasAudio?: boolean;
   volume?: number;
+  /** Meme com fundo verde: aplica chroma key (cor detectada em keyColor, 0xRRGGBB). */
+  greenScreen?: boolean;
+  keyColor?: string | null;
+  /** meme = só o som do meme (vídeo silencia); video = meme mudo; both = os dois, vídeo abaixado. */
+  audioMode?: 'meme' | 'video' | 'both';
 }
 
 export interface RenderShot {
@@ -41,6 +46,8 @@ export interface RenderSfx {
   file: string;
   at: number;
   volume: number;
+  /** Máximo a tocar (s); o fim recebe fade. Padrão 5s. */
+  duration?: number;
 }
 
 export interface RenderSpec {
@@ -61,6 +68,11 @@ export interface RenderSpec {
    * quadro: tudo (fundo, enquadramentos) passa a usar só essa faixa — sem borrões nem artefatos.
    */
   cleanArea?: { y0: number; y1: number } | null;
+  /**
+   * Layout de live (só em formatos verticais): facecam em cima, jogo embaixo. cam = caixa da facecam
+   * no quadro original (frações: x0, y0, x1, y1). game = centro horizontal do jogo (0-1).
+   */
+  split?: { cam: { x0: number; y0: number; x1: number; y1: number }; gameX?: number; camRatio?: number } | null;
   output: string;
   workDir: string;
   hwAccel?: HwAccel;
@@ -159,6 +171,7 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
   // 1) Formato de saída + enquadramentos (shots).
   // A legenda antiga já foi removida na preparação (prepareClipSource), não aqui.
   const baseKind = spec.format === 'vertical_crop' ? 'crop' : spec.format === 'original' ? 'scale' : 'blur';
+  const split = spec.split && H > W ? spec.split : null;
   const LEVELS = [1, 1.3, 1.6, 2.0];
   const windowFor = (level: number) => {
     let winH = srcH / level;
@@ -177,7 +190,7 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
    */
   type Placed = RenderShot & { level: number; x: number; y: number };
   const placed: (Placed | (RenderShot & { type: 'wide' }))[] = [];
-  for (const raw of (spec.shots ?? []).filter((x) => x.at < duration && x.duration > 0.2)) {
+  for (const raw of (split ? [] : spec.shots ?? []).filter((x) => x.at < duration && x.duration > 0.2)) {
     const sh = { ...raw, focusX: mapX(raw.focusX), focusY: mapY(raw.focusY) };
     if (sh.type === 'wide') {
       placed.push({ ...sh, type: 'wide' });
@@ -253,7 +266,29 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
     list.map((w) => `between(t,${num(Math.max(0, w.at))},${num(Math.min(duration, w.at + w.duration))})`).join('+');
 
   const baseIn = srcLabels[next++];
-  if (baseKind === 'blur') blurComposite(baseIn, 'base', 'b');
+  if (split) {
+    // Facecam (em cima) + jogo (embaixo): cada parte recortada na proporção exata da sua área
+    const topH = even(H * Math.min(0.5, Math.max(0.25, split.camRatio ?? 0.38)));
+    const botH = H - topH;
+    const fit = (cx: number, cy: number, minW: number, minH: number, aspect: number) => {
+      let w = Math.max(minW, minH * aspect);
+      let h = w / aspect;
+      if (w > srcW) (w = srcW), (h = w / aspect);
+      if (h > srcH) (h = srcH), (w = h * aspect);
+      w = even(w);
+      h = even(h);
+      const x = Math.round(Math.min(srcW - w, Math.max(0, cx - w / 2)));
+      const y = Math.round(Math.min(srcH - h, Math.max(0, cy - h / 2)));
+      return { w, h, x, y };
+    };
+    const cam = split.cam;
+    const camBox = fit(((mapX(cam.x0) + mapX(cam.x1)) / 2) * srcW, ((mapY(cam.y0) + mapY(cam.y1)) / 2) * srcH, (mapX(cam.x1) - mapX(cam.x0)) * srcW, (mapY(cam.y1) - mapY(cam.y0)) * srcH, W / topH);
+    const gameBox = fit((split.gameX ?? 0.5) * srcW, srcH / 2, 0, srcH, W / botH);
+    f.push(`[${baseIn}]split=2[cam0][game0]`);
+    f.push(`[cam0]crop=${camBox.w}:${camBox.h}:${camBox.x}:${camBox.y},scale=${W}:${topH},setsar=1[camv]`);
+    f.push(`[game0]crop=${gameBox.w}:${gameBox.h}:${gameBox.x}:${gameBox.y},scale=${W}:${botH},setsar=1[gamev]`);
+    f.push(`[camv][gamev]vstack=inputs=2,setsar=1[base]`);
+  } else if (baseKind === 'blur') blurComposite(baseIn, 'base', 'b');
   else if (baseKind === 'crop') f.push(`[${baseIn}]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1[base]`);
   else f.push(`[${baseIn}]scale=${W}:${H},setsar=1[base]`);
   label = 'base';
@@ -289,7 +324,7 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
   });
 
   // Com enquadramento por pessoa ativo, punch-ins fortes cortariam cabeças: ficam sutis e altos
-  const personFraming = focusBranches.length > 0;
+  const personFraming = focusBranches.length > 0 || !!split;
 
   // 3) Zooms (punch-in): agrupados em até 3 níveis; x/y variam por expressão em cada janela
   const zooms = (spec.zooms ?? [])
@@ -325,6 +360,8 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
 
   // 4) Overlays (memes / imagens)
   const audioInputs: string[] = [];
+  /** Janelas em que um meme com áudio toca: o áudio original abaixa (ducking) para o meme ser ouvido. */
+  const duckWindows: { a: number; b: number; level: number }[] = [];
   const overlays = (spec.overlays ?? []).filter((o) => o.at < duration);
   overlays.forEach((o, i) => {
     const dur = Math.min(o.duration, duration - o.at);
@@ -333,12 +370,17 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
     const k = idx++;
     const ow = even(W * Math.min(1, Math.max(0.1, o.scale)));
     const fadeOut = Math.max(o.at, o.at + dur - 0.15);
+    // Fundo verde vira transparente; despill tira o reflexo verde das bordas do recorte
+    const key = o.keyColor && /^0x[0-9a-fA-F]{6}$/.test(o.keyColor) ? o.keyColor : '0x00FF00';
+    const chroma = o.greenScreen ? `format=yuv420p,chromakey=color=${key}:similarity=0.16:blend=0.06,despill=type=green,` : '';
     f.push(
-      `[${k}:v]scale=${ow}:-2,format=rgba,setpts=PTS-STARTPTS+${num(o.at)}/TB,fade=t=in:st=${num(o.at)}:d=0.12:alpha=1,fade=t=out:st=${num(fadeOut)}:d=0.15:alpha=1[ov${i}]`,
+      `[${k}:v]${chroma}scale=${ow}:-2,format=rgba,setpts=PTS-STARTPTS+${num(o.at)}/TB,fade=t=in:st=${num(o.at)}:d=0.12:alpha=1,fade=t=out:st=${num(fadeOut)}:d=0.15:alpha=1[ov${i}]`,
     );
     f.push(`[${label}][ov${i}]overlay=${overlayXY(o.position, vertical)}:enable='between(t,${num(o.at)},${num(o.at + dur)})':eof_action=pass[vo${i}]`);
     label = `vo${i}`;
-    if (o.hasAudio) {
+    if (o.hasAudio && o.audioMode !== 'video') {
+      // "meme": a fala do vídeo silencia; "both": fica a 30% por baixo do som do meme
+      duckWindows.push({ a: o.at, b: o.at + dur, level: o.audioMode === 'meme' ? 0 : 0.3 });
       const ms = Math.round(o.at * 1000);
       f.push(`[${k}:a]atrim=0:${num(dur)},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume=${num(o.volume ?? 0.9, 2)},adelay=${ms}:all=1[ova${i}]`);
       audioInputs.push(`[ova${i}]`);
@@ -358,19 +400,29 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
   } else {
     f.push(`anullsrc=r=48000:cl=stereo,atrim=0:${num(duration)}[a0]`);
   }
+  let mainAudio = 'a0';
+  if (duckWindows.length) {
+    // Volume do áudio original por instante: o menor nível entre as janelas ativas (silêncio vence ducking)
+    const vol = [...duckWindows].sort((x, y) => y.level - x.level).reduce((acc, w) => `if(between(t,${num(w.a)},${num(w.b)}),${num(w.level, 2)},${acc})`, '1');
+    f.push(`[a0]volume=volume='${vol}':eval=frame[a0d]`);
+    mainAudio = 'a0d';
+  }
   (spec.sfx ?? [])
     .filter((s) => s.at < duration - 0.1)
     .forEach((s, i) => {
       inputs.push('-i', s.file);
       const k = idx++;
       const ms = Math.round(s.at * 1000);
-      f.push(`[${k}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${num(Math.min(2, Math.max(0, s.volume)), 2)},adelay=${ms}:all=1[sx${i}]`);
+      const sd = Math.min(10, Math.max(0.3, s.duration ?? 5));
+      f.push(
+        `[${k}:a]atrim=0:${num(sd)},afade=t=out:st=${num(Math.max(0, sd - 0.25))}:d=0.25,aresample=48000,aformat=channel_layouts=stereo,volume=${num(Math.min(2, Math.max(0, s.volume)), 2)},adelay=${ms}:all=1[sx${i}]`,
+      );
       audioInputs.push(`[sx${i}]`);
     });
   if (audioInputs.length) {
-    f.push(`[a0]${audioInputs.join('')}amix=inputs=${audioInputs.length + 1}:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]`);
+    f.push(`[${mainAudio}]${audioInputs.join('')}amix=inputs=${audioInputs.length + 1}:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]`);
   } else {
-    f.push(`[a0]anull[aout]`);
+    f.push(`[${mainAudio}]anull[aout]`);
   }
 
   const threads = String(Math.max(1, Math.min(32, Math.floor(spec.threads ?? 4))));

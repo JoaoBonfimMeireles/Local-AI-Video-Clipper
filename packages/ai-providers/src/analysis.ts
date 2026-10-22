@@ -13,6 +13,8 @@ import {
   TranslationSchema,
   withGuidelines,
   ANALYSIS_SYSTEM,
+  ANALYSIS_SYSTEM_TWITCH,
+  type AssetMeta,
   buildAnalysisPrompt,
   buildSelectionFromKnowledgePrompt,
   VideoKnowledgeSchema,
@@ -134,6 +136,9 @@ export async function aiPlanEdits(args: {
   guidelines?: string;
   knowledge?: VideoKnowledge | null;
   sendImages?: boolean;
+  assetMeta?: AssetMeta;
+  splitLayout?: boolean;
+  catalog?: string;
   log: Log;
   signal?: AbortSignal;
 }): Promise<Map<number, ClipEdit>> {
@@ -172,6 +177,9 @@ export async function aiPlanEdits(args: {
           language: args.language,
           knowledge: args.knowledge,
           visualByClip,
+          assetMeta: args.assetMeta,
+          splitLayout: args.splitLayout,
+          catalog: args.catalog,
         }),
         images: images.length ? images : undefined,
         signal: args.signal,
@@ -194,6 +202,7 @@ export async function aiAnalyzeVideo(args: {
   videoDuration: number;
   frames?: FrameRef[];
   sendImages: boolean;
+  mode?: 'youtube' | 'twitch';
   log: Log;
   signal?: AbortSignal;
 }): Promise<VideoKnowledge> {
@@ -208,14 +217,15 @@ export async function aiAnalyzeVideo(args: {
       await askJson(
         args.llm,
         {
-          system: ANALYSIS_SYSTEM,
+          system: args.mode === 'twitch' ? ANALYSIS_SYSTEM_TWITCH : ANALYSIS_SYSTEM,
           prompt: buildAnalysisPrompt({
+            mode: args.mode,
             transcriptText: chunk.text,
             videoDuration: args.videoDuration,
             visualNotes: useImages ? visualNotes : undefined,
             chunkInfo: chunks.length > 1 ? `Este é o bloco ${c + 1}/${chunks.length} (de ${chunk.from.toFixed(0)}s a ${chunk.to.toFixed(0)}s).` : '',
           }),
-          images: useImages ? frames.slice(0, 16).map((f) => imageFromFile(f.path)) : undefined,
+          images: useImages ? frames.slice(0, 12).map((f) => imageFromFile(f.path)) : undefined,
           maxTokens: 32768,
           signal: args.signal,
         },
@@ -265,6 +275,7 @@ export async function aiSelectFromKnowledge(args: {
     title: x.title,
     reason: x.reason,
     hook: x.hook,
+    category: x.category,
   }));
 }
 

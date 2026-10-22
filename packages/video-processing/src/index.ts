@@ -5,3 +5,4 @@ export * from './frames';
 export * from './subtitles';
 export * from './render';
 export * from './prepare';
+export * from './assets';

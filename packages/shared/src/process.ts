@@ -10,6 +10,8 @@ export interface RunOptions {
   /** Guarda só o fim do stderr para mensagens de erro (FFmpeg é muito verboso). */
   stderrTailBytes?: number;
   captureStdout?: boolean;
+  /** Saída binária (ex.: frames rawvideo): stdout vira string latin1 (1 byte = 1 caractere, sem perdas). */
+  binaryStdout?: boolean;
 }
 
 export interface RunResult {
@@ -88,7 +90,7 @@ export function runProcess(cmd: string, args: string[], opts: RunOptions = {}): 
     opts.signal?.addEventListener('abort', onAbort, { once: true });
     const timer = opts.timeoutMs ? setTimeout(onAbort, opts.timeoutMs) : null;
 
-    child.stdout.setEncoding('utf8');
+    child.stdout.setEncoding(opts.binaryStdout ? 'latin1' : 'utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (d: string) => {
       if (opts.captureStdout !== false) stdoutChunks.push(d);

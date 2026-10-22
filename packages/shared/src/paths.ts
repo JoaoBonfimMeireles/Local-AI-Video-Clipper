@@ -71,12 +71,9 @@ export function ensureDataDirs(): void {
     d.output,
     d.temp,
     d.images,
-    path.join(d.memes, 'humor'),
-    path.join(d.memes, 'choque'),
-    path.join(d.memes, 'reacoes'),
-    path.join(d.audio, 'impacto'),
-    path.join(d.audio, 'risadas'),
-    path.join(d.audio, 'transicao'),
+    // Memes e sons podem ficar todos numa pasta só (escolhidos pelo nome); subpastas são opcionais
+    d.memes,
+    d.audio,
   ];
   for (const dir of dirs) fs.mkdirSync(dir, { recursive: true });
 }

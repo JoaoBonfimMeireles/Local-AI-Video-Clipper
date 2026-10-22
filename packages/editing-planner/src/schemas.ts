@@ -26,7 +26,9 @@ export const ClipCandidateSchema = z
   .object({
     start: Seconds.optional(),
     end: Seconds.optional(),
-    segments: z.array(SegmentSchema).max(4).optional(),
+    segments: z.array(SegmentSchema).max(8).optional(),
+    /** Modo Twitch: categoria do corte (funny, scary, top5...). */
+    category: z.string().trim().max(30).optional(),
     score: z.coerce.number().finite().min(0).max(100),
     title: z.string().trim().min(1).max(140),
     reason: z.string().trim().max(800).default(''),
@@ -64,19 +66,31 @@ export const ZoomSchema = z.object({
 
 export const OverlaySchema = z.object({
   type: z.enum(['meme', 'image']).default('meme'),
-  category: SafeName,
+  // Com o catálogo por códigos (m12, s3) a categoria vem do próprio catálogo; a IA pode omiti-la
+  category: SafeName.default('_geral'),
   file: SafeFileName.optional().nullable(),
   at: Seconds,
   duration: z.coerce.number().finite().min(0.3).max(10),
   position: OverlayPositionSchema.default('top'),
   scale: z.coerce.number().finite().min(0.1).max(1).default(0.5),
+  /**
+   * Áudio quando o meme tem som: meme = só o som do meme (vídeo mudo nesse trecho); video = meme mudo,
+   * fica a fala do corte; both = os dois, com o vídeo abaixado.
+   */
+  audioMode: z.enum(['meme', 'video', 'both']).default('both'),
+  /** Por que este meme combina com o momento (validação da própria IA). */
+  reason: z.string().trim().max(300).optional(),
 });
 
 export const SfxSchema = z.object({
-  category: SafeName,
+  // Com o catálogo por códigos (m12, s3) a categoria vem do próprio catálogo; a IA pode omiti-la
+  category: SafeName.default('_geral'),
   file: SafeFileName.optional().nullable(),
   at: Seconds,
   volume: z.coerce.number().finite().min(0).max(2).default(0.8),
+  /** Quanto do som tocar (s). Sons longos são cortados com fade para não virarem trilha de fundo. */
+  duration: z.coerce.number().finite().min(0.3).max(10).optional(),
+  reason: z.string().trim().max(300).optional(),
 });
 
 /**
@@ -142,6 +156,7 @@ export const VideoKnowledgeSchema = z.object({
         description: z.string().trim().max(500),
         quote: z.string().trim().max(400).optional(),
         speaker: z.string().trim().max(20).optional(),
+        topic: z.string().trim().max(80).optional(),
         strength: z.coerce.number().finite().min(0).max(100).default(50),
         visual: z.string().trim().max(300).optional(),
       }),

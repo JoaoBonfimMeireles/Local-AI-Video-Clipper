@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { FileVideo, Loader2, Play, RefreshCw, Save, Trash2, UploadCloud } from 'lucide-react';
-import { creditLine, DEFAULT_JOB_SETTINGS, formatBytes, LANGUAGES, type Intensity, type JobSettings, type OutputFormat, type Preset } from '@clipper/shared';
+import { creditLine, DEFAULT_JOB_SETTINGS, formatBytes, LANGUAGES, TWITCH_CATEGORIES, type Intensity, type JobSettings, type OutputFormat, type Preset } from '@clipper/shared';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -204,6 +204,66 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
               </Button>
             )}
           </div>
+        </section>
+
+        {/* Tipo de conteúdo */}
+        <section className="space-y-2">
+          <Label>Tipo de vídeo</Label>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {(
+              [
+                { value: 'youtube', label: 'YouTube / podcast', desc: 'Entrevistas, podcasts, vlogs: falas fortes e histórias completas' },
+                { value: 'twitch', label: 'Live da Twitch', desc: 'Jogos e interação: momentos engraçados, sustos, chat, zoeiras, top 5' },
+              ] as const
+            ).map((m) => (
+              <button
+                key={m.value}
+                type="button"
+                onClick={() => set('mode', m.value)}
+                className={cn('rounded-lg border p-3 text-left transition-colors', settings.mode === m.value ? 'border-primary bg-primary/10' : 'hover:bg-accent/40')}
+              >
+                <div className="text-sm font-semibold">{m.label}</div>
+                <div className="mt-0.5 text-xs text-muted-foreground">{m.desc}</div>
+              </button>
+            ))}
+          </div>
+          {settings.mode === 'twitch' && (
+            <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
+              <div>
+                <Label>Que momentos procurar</Label>
+                <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+                  {TWITCH_CATEGORIES.map((c) => {
+                    const on = settings.twitchCategories.includes(c.key);
+                    return (
+                      <label key={c.key} className="flex cursor-pointer items-start gap-2 rounded-md border bg-background/50 px-2.5 py-2">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5 accent-[var(--primary)]"
+                          checked={on}
+                          onChange={() => set('twitchCategories', on ? settings.twitchCategories.filter((k) => k !== c.key) : [...settings.twitchCategories, c.key])}
+                        />
+                        <span>
+                          <span className="block text-sm">{c.label}</span>
+                          <span className="block text-xs text-muted-foreground">{c.desc}</span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Layout no vertical</Label>
+                <Select value={settings.twitchLayout} onChange={(e) => set('twitchLayout', e.target.value as JobSettings['twitchLayout'])}>
+                  <option value="auto">Automático (facecam em cima + jogo embaixo, se houver facecam)</option>
+                  <option value="split">Sempre facecam + jogo</option>
+                  <option value="full">Enquadramento normal (IRL / sem facecam)</option>
+                </Select>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Memes em vídeo com fundo verde (ex.: Green Screen Memes) são recortados automaticamente; memes com áudio abaixam o som da live enquanto tocam.
+              </p>
+            </div>
+          )}
         </section>
 
         {/* 2 e 3. Duração e quantidade */}

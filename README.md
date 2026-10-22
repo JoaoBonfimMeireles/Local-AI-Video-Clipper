@@ -115,6 +115,43 @@ A seleção pode **juntar trechos distantes** num mesmo corte (até 4, em qualqu
 - **Créditos:** campos de título/canal/link do vídeo original (Creative Commons) no formulário; a linha de créditos
   vai ao fim de cada descrição.
 
+### Modo Twitch (lives)
+
+No formulário, escolha **Live da Twitch**. Muda o olhar da IA e a edição:
+
+- **Análise como espectador de live:** mapeia a live inteira em momentos com tipo e **assunto**. Os cortes são
+  separados por categoria (mais engraçados, tensos/assustadores, interação com o chat, zoeira entre pessoas, falas
+  marcantes, jogadas) e há um corte **Top 5 da live** (compilação dos 5 melhores momentos).
+- **Recorte por assunto:** até 8 trechos por corte. Se o streamer fala de "banana", desvia para "maçã" e volta, o corte
+  junta só os trechos de "banana". Tempo morto é cortado.
+- **Layout facecam + jogo:** se houver facecam fixa num canto (detectada automaticamente), o vertical vira câmera em
+  cima e jogo embaixo, com a legenda na emenda. Para IRL/sem facecam, usa o enquadramento por pessoas.
+- **Memes green screen** (ex.: Green Screen Memes): vídeos com fundo verde são detectados e recortados (chroma key) por
+  cima do vídeo; memes com áudio entram na mixagem e o som da live abaixa enquanto tocam. Sons (ex.: myinstants) vão em
+  `data/audio/<categoria>`. A IA recebe duração, áudio e fundo verde de cada arquivo da biblioteca.
+- O cache de conhecimento do modo Twitch é separado do modo YouTube (análises diferentes do mesmo arquivo).
+
+### Biblioteca grande numa pasta só
+
+Pode jogar milhares de memes direto em `data/memes/` e sons em `data/audio/`, sem subpastas. A cada job:
+
+1. Os nomes são limpos e decodificados (`Ai-cat-laughing-Meme-Green-Screen.mp4` → "Ai cat laughing"; nomes `%D0%...`
+   viram texto legível) e comparados com o que acontece nos cortes (fala, análise, categoria — com tradução de
+   conceitos PT→EN como risada→laugh, susto→scared).
+2. Só os ~70 memes e ~60 sons mais relevantes são analisados (duração, áudio, fundo verde; com cache) e entram no
+   prompt num **catálogo compacto com códigos** (`m12: Cat shocked (2.1s, com áudio, fundo verde)`). Sons longos
+   (músicas, > 8s) ficam de fora e cada efeito toca no máximo ~5s com fade.
+3. A IA só usa um meme/som se o nome combinar com o momento e justifica em `reason`; código inexistente é corrigido
+   para o nome mais parecido ou descartado (nunca é sorteado um aleatório).
+4. Para memes com áudio a IA decide `audioMode`: **meme** (só o som do meme), **video** (meme mudo, fica a fala) ou
+   **both** (os dois, vídeo a 30%).
+
+Imagens estáticas não são usadas nas edições (só memes em vídeo e sons).
+
+**Economia de tokens:** a análise do vídeo (resumo + momentos) fica em cache e substitui transcrição e frames nas
+seleções seguintes; o plano envia 8 frames por corte (a posição exata vem da detecção local de rostos) e só o catálogo
+pré-selecionado da biblioteca.
+
 ### Diretrizes editoriais
 
 Em **Configurações → Diretrizes editoriais da IA** você descreve como a IA deve escolher trechos, editar,

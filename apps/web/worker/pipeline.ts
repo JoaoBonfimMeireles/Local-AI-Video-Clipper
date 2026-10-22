@@ -26,14 +26,15 @@ import {
   type ClipCandidate,
   type ClipSegment,
 } from '@clipper/clip-selection';
-import { heuristicEdit, heuristicShots, normalizeEdit, refineShots, resolveEdit, type ClipEdit, type ResolvedEdit, type VideoKnowledge } from '@clipper/editing-planner';
-import { creditLine, flattenWords, formatTimestamp, slugify, type AppSettings, type Job, type JobResult, type PipelineStep, type ProbeInfo, type Transcript, type TranscriptWord } from '@clipper/shared';
+import { buildCatalog, detectFacecam, heuristicEdit, shortlistLibrary, heuristicShots, normalizeEdit, refineShots, resolveEdit, type AssetMeta, type ClipEdit, type ResolvedEdit, type VideoKnowledge } from '@clipper/editing-planner';
+import { creditLine, flattenWords, formatTimestamp, slugify, TWITCH_CATEGORIES, type AppSettings, type Job, type JobResult, type PipelineStep, type ProbeInfo, type Transcript, type TranscriptWord } from '@clipper/shared';
 import {
   addJobLog,
   dataPaths,
   getAppSettings,
   getJob,
   replaceClips,
+  resolveLibraryFile,
   scanLibrary,
   setJobResult,
   updateClip,
@@ -46,7 +47,9 @@ import {
   canvasSize,
   detectSceneChanges,
   detectSilences,
+  analyzeAssets,
   extractAudio,
+  type AssetInfo,
   extractClipFramesFps,
   extractFrames,
   extractThumbnail,
@@ -208,6 +211,19 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
   });
   log('info', `${scenes.length} trocas de cena detectadas; ${frames.length} frames extraídos`);
 
+  // Modo Twitch: se há facecam fixa num canto, o vertical vira facecam (em cima) + jogo (embaixo)
+  let splitLayout: { cam: { x0: number; y0: number; x1: number; y1: number } } | null = null;
+  const verticalOut = s.format === 'vertical_blur' || s.format === 'vertical_crop';
+  if (s.mode === 'twitch' && verticalOut && s.twitchLayout !== 'full') {
+    const camBox = await cached('facecam.json', async () => detectFacecam(await detectFaces(frames.map((f) => f.path), signal)));
+    if (camBox) {
+      splitLayout = { cam: camBox };
+      log('info', `Facecam detectada (x ${Math.round(camBox.x0 * 100)}–${Math.round(camBox.x1 * 100)}%, y ${Math.round(camBox.y0 * 100)}–${Math.round(camBox.y1 * 100)}%): layout facecam + jogo`);
+    } else {
+      log(s.twitchLayout === 'split' ? 'warn' : 'info', 'Nenhuma facecam fixa detectada; usando enquadramento por pessoas');
+    }
+  }
+
   // ---------------- 4. Conhecimento do vídeo + seleção (IA) ----------------
   begin('select', 'Analisando o vídeo e selecionando os melhores cortes');
   // Um provedor por papel: no plano combinado do Gemini, o Pro escolhe os cortes e o Flash faz o resto.
@@ -235,14 +251,15 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
   const cacheBase = videoCacheBase(job.inputPath, app.whisperModel, s.sourceLanguage);
   let knowledge: VideoKnowledge | null = null;
   if (llm) {
-    const kFile = `${cacheBase}.knowledge.json`;
+    // A análise de live (Twitch) tem outro olhar e outras categorias: cache separado por modo
+    const kFile = `${cacheBase}.knowledge${s.mode === 'twitch' ? '-twitch' : ''}.json`;
     if (fs.existsSync(kFile)) {
       knowledge = JSON.parse(fs.readFileSync(kFile, 'utf8')) as VideoKnowledge;
       log('info', `Conhecimento do vídeo reaproveitado do cache (${knowledge.moments.length} momentos) — sem reenviar transcrição e frames`);
     } else {
       try {
         log('info', `Analisando o vídeo com ${llm.model} (transcrição${app.sendFramesToAI ? ' + frames' : ''}); o resultado fica em cache`);
-        knowledge = await aiAnalyzeVideo({ llm, transcript, videoDuration: info.duration, frames, sendImages: app.sendFramesToAI, signal, log: (l, m) => log(l, m) });
+        knowledge = await aiAnalyzeVideo({ llm, transcript, videoDuration: info.duration, frames, sendImages: app.sendFramesToAI, mode: s.mode, signal, log: (l, m) => log(l, m) });
         fs.mkdirSync(path.dirname(kFile), { recursive: true });
         fs.writeFileSync(kFile, JSON.stringify(knowledge));
         log('info', `Análise concluída: ${knowledge.speakers.length} pessoa(s), ${knowledge.moments.length} momentos`);
@@ -300,21 +317,68 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
     return picked.map((c, index) => ({ ...c, segments: segmentsOf(c), index }));
   });
   if (!selected.length) throw new Error('Nenhum corte selecionado.');
-  replaceClips(job.id, selected.map((c) => ({ index: c.index, title: c.title, start: c.start, end: c.end, score: c.score, reason: c.reason })));
+  const categoryLabel = (c: ClipCandidate) => TWITCH_CATEGORIES.find((x) => x.key === c.category)?.label ?? c.category ?? '';
+  replaceClips(
+    job.id,
+    selected.map((c) => ({ index: c.index, title: c.title, start: c.start, end: c.end, score: c.score, reason: c.category ? `[${categoryLabel(c)}] ${c.reason}` : c.reason })),
+  );
   for (const c of selected) {
     const parts = c.segments.map((sg) => `${sg.start.toFixed(1)}–${sg.end.toFixed(1)}s`).join(' + ');
-    log('info', `Corte ${c.index + 1}: ${parts} = ${clipDuration(c).toFixed(0)}s (nota ${Math.round(c.score)}) "${c.title}"`);
+    log('info', `Corte ${c.index + 1}${c.category ? ` [${categoryLabel(c)}]` : ''}: ${parts} = ${clipDuration(c).toFixed(0)}s (nota ${Math.round(c.score)}) "${c.title}"`);
   }
   progress('select', 1, true);
 
   // ---------------- 5. Plano de edição ----------------
   begin('plan', `Gerando plano de edição e enquadramento (intensidade ${s.intensity})`);
   const library = scanLibrary();
+  // Biblioteca pode ter milhares de arquivos numa pasta só: pré-seleciona pelo NOME os que combinam com
+  // o que acontece nos cortes, e só esses são analisados (duração, áudio, fundo verde) e mostrados à IA.
   const clipWords = new Map<number, TranscriptWord[]>(selected.map((c) => [c.index, wordsForSegments(transcript, c.segments)]));
+  const contextTexts = selected.flatMap((c) => {
+    const moments = (knowledge?.moments ?? []).filter((m) => c.segments.some((sg) => m.end > sg.start && m.start < sg.end));
+    return [c.title, c.reason, c.category ?? '', clipWords.get(c.index)!.map((w) => w.word).join(' '), ...moments.map((m) => `${m.type} ${m.topic ?? ''} ${m.description} ${m.visual ?? ''}`)];
+  });
+  const shortlist = shortlistLibrary(library, contextTexts, { memes: s.useMemes ? 70 : 0, images: 0, audio: s.useSfx ? 60 : 0 }, job.id);
+  const assetInfo = new Map<string, AssetInfo>();
+  const assetMeta: AssetMeta = {};
+  const metaCache = path.join(dataPaths.root, 'cache', 'library-meta.json');
+  /** Analisa (com cache) os arquivos visuais indicados e registra em assetInfo/assetMeta. */
+  const analyzeRefs = async (refs: { kind: 'memes' | 'images' | 'audio'; cat: string; file: string }[]) => {
+    const withPath = refs.map((r) => ({ ...r, full: resolveLibraryFile(library, r.kind, r.cat, r.file) })).filter((r) => r.full && !assetInfo.has(r.full));
+    if (!withPath.length) return;
+    const infos = await analyzeAssets(withPath.map((r) => r.full!), metaCache);
+    for (const r of withPath) {
+      const inf = infos.get(r.full!);
+      if (!inf) continue;
+      assetInfo.set(r.full!, inf);
+      assetMeta[`${r.kind}/${r.cat}/${r.file}`] = { duration: inf.duration, hasAudio: inf.hasAudio, greenScreen: inf.greenScreen };
+    }
+  };
+  if (s.useMemes) {
+    await analyzeRefs(shortlist.memes.flatMap((c) => c.files.map((file) => ({ kind: 'memes' as const, cat: c.name, file }))));
+  }
+  if (s.useSfx) {
+    // Sons longos (músicas inteiras) virariam trilha por baixo do corte: ficam fora da pré-seleção
+    await analyzeRefs(shortlist.audio.flatMap((c) => c.files.map((file) => ({ kind: 'audio' as const, cat: c.name, file }))));
+    shortlist.audio = shortlist.audio
+      .map((c) => ({ ...c, files: c.files.filter((f) => (assetMeta[`audio/${c.name}/${f}`]?.duration ?? 0) <= 8) }))
+      .filter((c) => c.files.length);
+  }
+  const total = (l: typeof library, k: 'memes' | 'images' | 'audio') => l[k].reduce((a, c) => a + c.files.length, 0);
+  log(
+    'info',
+    `Biblioteca: ${total(library, 'memes')} memes, ${total(library, 'audio')} sons — pré-selecionados pelo nome: ${total(shortlist, 'memes')} memes (${[...assetInfo.values()].filter((x) => x.greenScreen).length} fundo verde, ${[...assetInfo.values()].filter((x) => x.hasAudio).length} com áudio), ${total(shortlist, 'audio')} sons`,
+  );
+  const catalog = buildCatalog(shortlist, assetMeta);
   const plan = await cached<ResolvedEdit[]>('plan.json', async () => {
     // Frames a cada 1s + rostos (YuNet local) + cortes de câmera do original, na linha do tempo de cada corte
     const visual = new Map<number, { frames: { time: number; path: string; faces: DetectedFace[] }[]; cuts: number[] }>();
     for (const c of selected) {
+      if (splitLayout) {
+        // Layout facecam + jogo é fixo: não precisa de análise de enquadramento
+        visual.set(c.index, { frames: [], cuts: [] });
+        continue;
+      }
       const dense = await extractClipFramesFps(job.inputPath, c.segments, usableDir(path.join(tempDir, `clipframes_${c.index}`)), { fps: 1, signal });
       const faces = await detectFaces(dense.map((f) => f.path), signal);
       const cuts: number[] = [];
@@ -333,7 +397,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       try {
         // Imagens para a IA: o 1º frame após cada corte de câmera + amostras regulares, com os rostos descritos
         const clipFrames = new Map<number, { time: number; path: string; note?: string }[]>();
-        if (app.sendFramesToAI && editLlm.supportsImages) {
+        if (!splitLayout && app.sendFramesToAI && editLlm.supportsImages) {
           for (const c of selected) {
             const v = visual.get(c.index)!;
             const pick = new Set<number>();
@@ -341,9 +405,10 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
               const i = v.frames.findIndex((f) => f.time >= cut + 0.3);
               if (i >= 0) pick.add(i);
             }
-            const step = Math.max(1, Math.floor(v.frames.length / 8));
+            const step = Math.max(1, Math.floor(v.frames.length / 5));
             for (let i = 0; i < v.frames.length; i += step) pick.add(i);
-            const chosen = [...pick].sort((a, b) => a - b).slice(0, 16);
+            // 8 imagens por corte bastam: posição exata vem da detecção local de rostos (economiza tokens)
+            const chosen = [...pick].sort((a, b) => a - b).slice(0, 8);
             clipFrames.set(
               c.index,
               chosen.map((i) => ({ ...v.frames[i], note: describeFaces(v.frames[i].faces) })),
@@ -360,12 +425,26 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
           guidelines: app.editingPrompt,
           knowledge,
           sendImages: app.sendFramesToAI,
+          assetMeta,
+          splitLayout: !!splitLayout,
+          catalog: catalog.text,
           signal,
           log: (l, m) => log(l, m),
         });
       } catch (e) {
         if (signal.aborted) throw e;
         log('warn', `Plano por IA falhou (${(e as Error).message}); usando plano heurístico`);
+      }
+      // Códigos do catálogo (m12, s3...) → arquivos reais; código inexistente fica e é descartado na resolução
+      for (const e of aiEdits.values()) {
+        for (const o of e.overlays) {
+          const entry = o.file ? catalog.byId.get(o.file) : undefined;
+          if (entry && entry.kind !== 'audio') Object.assign(o, { file: entry.file, category: entry.category, type: entry.kind === 'images' ? 'image' : 'meme' });
+        }
+        for (const x of e.sfx) {
+          const entry = x.file ? catalog.byId.get(x.file) : undefined;
+          if (entry && entry.kind === 'audio') Object.assign(x, { file: entry.file, category: entry.category });
+        }
       }
     }
     return selected.map((c) => {
@@ -376,7 +455,9 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       // A IA decide quem/o que enquadrar; a detecção local de rostos corrige onde está, cena a cena
       const v = visual.get(c.index)!;
       const ctx = { duration, cuts: v.cuts, frames: v.frames };
-      edit.shots = edit.shots.length
+      edit.shots = splitLayout
+        ? []
+        : edit.shots.length
         ? refineShots(edit.shots, ctx)
         : s.format === 'original'
           ? []
@@ -386,7 +467,10 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       return resolved;
     });
   });
+  // Memes escolhidos fora da pré-seleção (plano heurístico) também precisam de duração/áudio/fundo verde
+  await analyzeRefs(plan.flatMap((p) => p.overlays.map((o) => ({ kind: o.type === 'image' ? ('images' as const) : ('memes' as const), cat: o.category, file: o.fileName }))));
   for (const p of plan) {
+    for (const o of p.overlays) if (o.reason) log('info', `Corte ${p.clipIndex + 1}: meme "${o.fileName}" em ${o.at.toFixed(1)}s (áudio: ${o.audioMode}) — ${o.reason}`);
     const shotKinds = p.shots.length ? ` (${p.shots.filter((x) => x.type === 'wide').length} abertos, ${p.shots.filter((x) => x.type === 'focus' && x.scale >= 1.3).length} aproximações)` : '';
     log('info', `Corte ${p.clipIndex + 1}: ${p.shots.length} enquadramentos${shotKinds}, ${p.zooms.length} zooms, ${p.overlays.length} memes, ${p.sfx.length} efeitos sonoros`);
     // Créditos do vídeo original (Creative Commons) sempre ao fim da descrição
@@ -501,7 +585,10 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       for (const o of edit.overlays) {
         if (!assetAudio.has(o.file)) assetAudio.set(o.file, (await probeAsset(o.file)).hasAudio);
       }
-      const ass = s.burnSubtitles ? buildAss(translatedWords ?? words, { width: canvas.width, height: canvas.height, intensity: s.intensity }) : undefined;
+      // No layout facecam + jogo a legenda fica na emenda entre as duas partes
+      const ass = s.burnSubtitles
+        ? buildAss(translatedWords ?? words, { width: canvas.width, height: canvas.height, intensity: s.intensity, baseline: splitLayout ? 0.53 : undefined })
+        : undefined;
       const workDir = usableDir(path.join(tempDir, `render_${n}`));
 
       // Trechos emendados e/ou legenda antiga apagada: gera antes um vídeo-fonte limpo do corte
@@ -522,9 +609,18 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         format: s.format,
         shots: edit.shots,
         cleanArea,
+        split: splitLayout,
         zooms: edit.zooms,
-        overlays: edit.overlays.map((o) => ({ file: o.file, at: o.at, duration: o.duration, position: o.position, scale: o.scale, hasAudio: assetAudio.get(o.file), volume: 0.9 })),
-        sfx: edit.sfx.map((x) => ({ file: x.file, at: x.at, volume: x.volume })),
+        overlays: edit.overlays.map((o) => {
+          const inf = assetInfo.get(o.file);
+          // Meme em vídeo toca inteiro (até 6s), mesmo que a IA tenha pedido menos
+          const dur = inf && inf.duration > 0 ? Math.min(Math.max(o.duration, Math.min(inf.duration, 6)), inf.duration) : o.duration;
+          return { file: o.file, at: o.at, duration: dur, position: o.position, scale: o.scale, hasAudio: inf?.hasAudio ?? assetAudio.get(o.file), volume: 0.9, greenScreen: inf?.greenScreen, keyColor: inf?.keyColor, audioMode: o.audioMode };
+        }),
+        sfx: edit.sfx.map((x) => {
+          const len = assetInfo.get(x.file)?.duration ?? 0;
+          return { file: x.file, at: x.at, volume: x.volume, duration: x.duration ?? (len > 0 ? Math.min(len, 5) : 5) };
+        }),
         assContent: ass,
         output: `${base}.mp4`,
         workDir,
@@ -550,6 +646,8 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       const meta = {
         index: c.index + 1,
         title: c.title,
+        category: c.category ?? null,
+        layout: splitLayout ? 'facecam+jogo' : 'normal',
         score: Math.round(c.score),
         reason: c.reason,
         hook: c.hook ?? null,

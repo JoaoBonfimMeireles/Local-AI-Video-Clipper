@@ -11,6 +11,8 @@ export interface ClipCandidate {
   end: number;
   /** Trechos que compõem o corte, na ordem de exibição. Ausente = [start, end] contínuo. */
   segments?: ClipSegment[];
+  /** Modo Twitch: tipo de momento (funny, scary, top5...). */
+  category?: string;
   score: number;
   title: string;
   reason: string;
