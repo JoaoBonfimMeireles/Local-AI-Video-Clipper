@@ -131,6 +131,21 @@ No formulário, escolha **Live da Twitch**. Muda o olhar da IA e a edição:
   `data/audio/<categoria>`. A IA recebe duração, áudio e fundo verde de cada arquivo da biblioteca.
 - O cache de conhecimento do modo Twitch é separado do modo YouTube (análises diferentes do mesmo arquivo).
 
+### Clipes de referência (guia de estilo)
+
+Coloque cortes virais do seu nicho em `data/references/` (lives de jogos, conversa com o público, react…). Cada clipe
+é analisado **uma vez** — transcrição local, métricas de ritmo (cortes/min, palavras/s, picos de volume) e uma chamada
+pequena de IA (~5 mil tokens) que descreve a fórmula: gancho, estrutura, ritmo, humor, edição, legendas e final.
+As análises viram um **guia de estilo** compacto (em cache) que entra na escolha dos momentos, no plano de edição e nos
+ajustes. Em **Configurações → Clipes de referência** dá para ligar/desligar, ver o guia e "Analisar agora"; clipes novos
+também são analisados automaticamente no próximo processamento. Use os clipes só como referência privada de estudo.
+
+### Ajustar um corte pronto
+
+Na página do job, cada corte mostra os memes e sons usados e tem **"Pedir ajuste neste corte"**: descreva a mudança
+(trocar/tirar meme, começar antes, título…) e só aquele corte é refeito (~1 chamada pequena de IA), salvo como
+`clip_NNN_vN.mp4` — a versão anterior fica na pasta.
+
 ### Biblioteca grande numa pasta só
 
 Pode jogar milhares de memes direto em `data/memes/` e sons em `data/audio/`, sem subpastas. A cada job:

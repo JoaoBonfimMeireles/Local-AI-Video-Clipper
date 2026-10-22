@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { CheckCircle2, Cpu, KeyRound, Loader2, PenLine, Plug, RefreshCw, Save, TriangleAlert, XCircle } from 'lucide-react';
+import { CheckCircle2, Cpu, KeyRound, Loader2, PenLine, Plug, RefreshCw, Save, Sparkles, TriangleAlert, XCircle } from 'lucide-react';
 import { DEFAULT_APP_SETTINGS, LANGUAGES, type AiProviderName, type AppSettings, type GeminiPlan } from '@clipper/shared';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -205,6 +205,8 @@ export function SettingsForm() {
             </p>
           </CardContent>
         </Card>
+
+        <ReferencesCard enabled={settings.useReferences} onToggle={(v) => set('useReferences', v)} />
 
         <Card>
           <CardHeader>
@@ -412,6 +414,83 @@ function GeminiSection({
         {error && <span className="text-xs text-destructive">{error}</span>}
       </div>
     </div>
+  );
+}
+
+interface RefsResponse {
+  dir: string;
+  references: { name: string; analyzed: boolean; niche: string | null; stats: Record<string, number> | null }[];
+  guide: string | null;
+}
+
+/** Clipes virais de referência → guia de estilo usado pela IA. */
+function ReferencesCard({ enabled, onToggle }: { enabled: boolean; onToggle: (v: boolean) => void }) {
+  const [data, setData] = useState<RefsResponse | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const load = () => api<RefsResponse>('/api/references').then(setData).catch(() => undefined);
+  useEffect(() => {
+    load();
+  }, []);
+  async function analyze() {
+    setMsg(null);
+    try {
+      await api('/api/references', { method: 'POST' });
+      setMsg('Análise na fila. Acompanhe no Painel; ao terminar, clique em atualizar aqui.');
+    } catch (e) {
+      setMsg((e as Error).message);
+    }
+  }
+  const pending = data?.references.filter((r) => !r.analyzed).length ?? 0;
+  return (
+    <Card>
+      <CardHeader className="flex-row items-start justify-between">
+        <div className="space-y-1">
+          <CardTitle className="flex items-center gap-2">
+            <Sparkles className="size-4 text-primary" /> Clipes de referência (estilo)
+          </CardTitle>
+          <CardDescription>
+            Coloque cortes virais do seu nicho em <code className="break-all">{data?.dir ?? 'data/references'}</code>. Cada um é analisado uma vez e vira um guia de estilo que a IA segue
+            (gancho, ritmo, tipo de momento, memes, final).
+          </CardDescription>
+        </div>
+        <Button variant="ghost" size="icon" onClick={load} title="Atualizar">
+          <RefreshCw />
+        </Button>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <label className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5">
+          <span className="text-sm">Seguir o guia de estilo das referências</span>
+          <Switch checked={enabled} onCheckedChange={onToggle} />
+        </label>
+        {data && (
+          <ul className="space-y-1 text-xs">
+            {data.references.map((r) => (
+              <li key={r.name} className="flex items-center gap-2">
+                {r.analyzed ? <CheckCircle2 className="size-3.5 shrink-0 text-success" /> : <TriangleAlert className="size-3.5 shrink-0 text-warning" />}
+                <span className="truncate" title={r.name}>
+                  {r.name}
+                </span>
+                {r.niche && <span className="truncate text-muted-foreground">— {r.niche}</span>}
+              </li>
+            ))}
+            {!data.references.length && <li className="text-muted-foreground">Nenhum clipe na pasta ainda.</li>}
+          </ul>
+        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" onClick={analyze} disabled={!data?.references.length}>
+            <Sparkles /> Analisar agora{pending ? ` (${pending} novo${pending > 1 ? 's' : ''})` : ''}
+          </Button>
+          <span className="text-xs text-muted-foreground">Clipes novos também são analisados automaticamente no próximo processamento.</span>
+        </div>
+        {msg && <p className="text-xs text-muted-foreground">{msg}</p>}
+        {data?.guide && (
+          <details className="rounded-md border">
+            <summary className="cursor-pointer px-3 py-2 text-sm font-medium">Guia de estilo atual</summary>
+            <pre className="max-h-80 overflow-auto border-t px-3 py-2 font-sans text-xs leading-relaxed whitespace-pre-wrap">{data.guide}</pre>
+          </details>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

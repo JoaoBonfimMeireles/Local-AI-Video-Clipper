@@ -33,6 +33,7 @@ import {
 } from '@clipper/shared/server';
 import { analyzeAssets, buildAss, buildSrt, canvasSize, extractThumbnail, prepareClipSource, probe, renderClip } from '@clipper/video-processing';
 import { rankCardsFor } from './pipeline';
+import { cachedStyleGuide, combineGuidelines } from './references';
 
 interface RenderContext {
   input: string;
@@ -99,7 +100,7 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
   const revised = await askJson(
     llm,
     {
-      system: withGuidelines(REVISION_SYSTEM, app.editingPrompt),
+      system: withGuidelines(REVISION_SYSTEM, combineGuidelines(app.editingPrompt, app.useReferences ? cachedStyleGuide() : null)),
       prompt: buildRevisionPrompt({
         comment: rev.comment,
         currentPlan,

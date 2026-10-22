@@ -59,6 +59,10 @@ export const dataPaths = {
   get temp() {
     return path.join(getDataDir(), 'temp');
   },
+  /** Clipes de referência (cortes virais de outros canais) usados para aprender o estilo de edição. */
+  get references() {
+    return path.join(getDataDir(), 'references');
+  },
   get db() {
     return path.join(getDataDir(), 'database.db');
   },
@@ -74,6 +78,7 @@ export function ensureDataDirs(): void {
     // Memes e sons podem ficar todos numa pasta só (escolhidos pelo nome); subpastas são opcionais
     d.memes,
     d.audio,
+    d.references,
   ];
   for (const dir of dirs) fs.mkdirSync(dir, { recursive: true });
 }

@@ -63,6 +63,7 @@ import {
   validateProbe,
   type ExtractedFrame,
 } from '@clipper/video-processing';
+import { combineGuidelines, getStyleGuide } from './references';
 
 // Faixa de progresso global de cada etapa
 const STEP_RANGE: Record<PipelineStep, [number, number]> = {
@@ -244,7 +245,19 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       ? `${llm.name}/${llm.model}${llm.free ? ' (gratuito)' : ''}`
       : `${llm.name}: ${llm.model} (cortes) + ${editLlm?.model} (edição/textos)`
     : 'heuristic';
-  if (llm) log('info', `IA: ${result.provider}${app.editingPrompt.trim() ? ' — usando suas diretrizes editoriais' : ''}`);
+  // Guia de estilo aprendido dos clipes de referência (data/references): analisados uma vez, em cache
+  let styleGuide: string | null = null;
+  if (llm && app.useReferences) {
+    try {
+      styleGuide = await getStyleGuide({ app, llm: editLlm ?? llm, log: (l, m) => log(l, m), signal, analyzeMissing: true });
+    } catch (e) {
+      if (signal.aborted) throw e;
+      log('warn', `Guia de estilo indisponível: ${(e as Error).message}`);
+    }
+  }
+  const guidelines = combineGuidelines(app.editingPrompt, styleGuide);
+  const appGuided = { ...app, editingPrompt: guidelines };
+  if (llm) log('info', `IA: ${result.provider}${app.editingPrompt.trim() ? ' — usando suas diretrizes editoriais' : ''}${styleGuide ? ' — seguindo o guia de estilo das referências' : ''}`);
 
   // Conhecimento do vídeo (resumo, pessoas, momentos): calculado uma vez por vídeo e reaproveitado
   // em qualquer job futuro com o mesmo arquivo — economiza transcrição + frames nas próximas edições.
@@ -359,10 +372,10 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
     if (llm) {
       try {
         if (knowledge) {
-          candidates = await aiSelectFromKnowledge({ llm, knowledge, settings: s, app, videoDuration: info.duration, signal, log: (l, m) => log(l, m) });
+          candidates = await aiSelectFromKnowledge({ llm, knowledge, settings: s, app: appGuided, videoDuration: info.duration, signal, log: (l, m) => log(l, m) });
         } else {
           log('info', `Enviando transcrição${app.sendFramesToAI && llm.supportsImages ? ' + frames' : ''} para ${llm.name}/${llm.model}`);
-          candidates = await aiSelectCandidates({ llm, transcript, settings: s, app, videoDuration: info.duration, frames, signal, log: (l, m) => log(l, m) });
+          candidates = await aiSelectCandidates({ llm, transcript, settings: s, app: appGuided, videoDuration: info.duration, frames, signal, log: (l, m) => log(l, m) });
         }
         candidates = candidates.map(tidy);
         log('info', `IA propôs ${candidates.length} candidatos (${candidates.filter((c) => segmentsOf(c).length > 1).length} juntando trechos)`);
@@ -495,7 +508,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
           settings: s,
           library,
           language: app.postLanguage || transcript.language,
-          guidelines: app.editingPrompt,
+          guidelines,
           knowledge,
           sendImages: app.sendFramesToAI,
           assetMeta,

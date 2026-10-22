@@ -37,6 +37,7 @@ export const AppSettingsSchema = z
     editingPrompt: z.string().max(6000),
     ptTranscript: z.boolean(),
     subtitleRemoval: z.enum(['crop', 'inpaint']),
+    useReferences: z.boolean(),
     postLanguage: z.union([z.literal(''), z.string().regex(/^[a-z]{2,3}$/)]),
     anthropicModel: z.string().regex(/^[\w.\-]{1,80}$/),
     ollamaUrl: z.string().url().regex(/^https?:\/\//),

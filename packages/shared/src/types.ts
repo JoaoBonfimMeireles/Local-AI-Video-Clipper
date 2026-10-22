@@ -50,6 +50,8 @@ export interface JobSettings {
   mode: ContentMode;
   /** Job de AJUSTE: refaz só um corte já pronto a partir de um comentário (não reprocessa o vídeo). */
   revision?: { parentJobId: string; clipIndex: number; comment: string } | null;
+  /** Job que só analisa os clipes de referência (gera o guia de estilo), sem vídeo de entrada. */
+  analyzeReferences?: boolean;
   /** Modo Twitch: quais tipos de momento procurar. */
   twitchCategories: TwitchCategory[];
   twitchLayout: TwitchLayout;
@@ -82,6 +84,8 @@ export interface AppSettings {
   ptTranscript: boolean;
   /** Legenda antiga: crop = enquadrar sem a faixa (limpo); inpaint = apagar o texto e preencher. */
   subtitleRemoval: 'crop' | 'inpaint';
+  /** Usa o guia de estilo aprendido dos clipes em data/references nas seleções e edições. */
+  useReferences: boolean;
   anthropicModel: string;
   ollamaUrl: string;
   ollamaModel: string;
@@ -122,6 +126,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   postLanguage: 'pt',
   ptTranscript: true,
   subtitleRemoval: 'crop',
+  useReferences: true,
   anthropicModel: 'claude-sonnet-5-5',
   ollamaUrl: 'http://127.0.0.1:11434',
   ollamaModel: 'llama3',

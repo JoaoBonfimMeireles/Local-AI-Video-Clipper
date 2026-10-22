@@ -370,3 +370,37 @@ Regras: só preencha "segments" (tempos ABSOLUTOS do vídeo original) se o pedid
 (ex.: "começa 5s antes" → start do primeiro trecho - 5); senão use null. Se mudar os trechos, ajuste os tempos dos
 memes/sons para a nova linha do tempo. Textos (title/description/hashtags) no idioma "${args.language}".`;
 }
+
+export const REFERENCE_SYSTEM = `Você é um editor de clipes virais estudando um corte de sucesso para copiar a FÓRMULA (não o
+conteúdo). Pela transcrição, pelas métricas de ritmo e pelos frames, explique como o clipe prende a atenção.
+Seja concreto e prático (tempos, quantidades, exemplos). Escreva em português. Responda SOMENTE com JSON válido.`;
+
+export function buildReferencePrompt(args: { name: string; transcript: string; stats: string; visualNotes?: string }): string {
+  return `Clipe de referência: "${args.name}"
+Métricas medidas: ${args.stats}
+${args.visualNotes ? `Frames (imagens anexadas nesta ordem):\n${args.visualNotes}\n` : ''}
+Transcrição (tempos em segundos):
+${args.transcript || '(sem fala)'}
+
+Retorne JSON:
+{"niche":"ex.: clipe de live de GTA RP com facecam",
+ "hook":"como os primeiros 1-3s prendem (frase, ação, texto na tela)",
+ "structure":"sequência do clipe: contexto → tensão → clímax/piada → reação; onde fica o momento principal",
+ "pacing":"ritmo: duração, cortes por minuto, cortes secos de pausas, velocidade",
+ "humor":"tipo de humor/emoção e o que torna engraçado",
+ "editing":"zooms, memes, sons, texto na tela, enquadramento (facecam/jogo), quando entram",
+ "captions":"estilo das legendas (tamanho, palavras por vez, destaque)",
+ "ending":"como termina (corte seco na reação, punchline, loop...)",
+ "tips":["regra prática 1 para reproduzir este estilo", "..."]}`;
+}
+
+export function buildStyleGuidePrompt(styles: { name: string; style: unknown }[]): string {
+  return `Abaixo estão análises de ${styles.length} clipe(s) viral(is) de referência. Junte o que é COMUM e mais eficaz em um
+GUIA DE ESTILO único, curto e prático (no máximo ~350 palavras, em tópicos), para orientar outro editor a escolher
+momentos e editar clipes no mesmo estilo. Inclua: tipos de momento que viralizam, gancho, estrutura, duração ideal,
+ritmo/cortes, uso de memes/sons/zoom, legendas e final. Não cite nomes de canais.
+
+${styles.map((s, i) => `### Referência ${i + 1}: ${s.name}\n${JSON.stringify(s.style)}`).join('\n\n')}
+
+Retorne JSON: {"guide":"texto do guia em tópicos"}`;
+}

@@ -239,3 +239,22 @@ export const RevisionSchema = ClipEditSchema.omit({ clipIndex: true }).extend({
   changes: z.string().trim().max(400).optional(),
 });
 export type Revision = z.infer<typeof RevisionSchema>;
+
+// ---------- Clipes de referência (estilo aprendido de cortes virais) ----------
+
+export const ReferenceStyleSchema = z.object({
+  niche: z.string().trim().max(200).default(''),
+  hook: z.string().trim().max(600),
+  structure: z.string().trim().max(800),
+  pacing: z.string().trim().max(600),
+  humor: z.string().trim().max(600).default(''),
+  editing: z.string().trim().max(800),
+  captions: z.string().trim().max(400).default(''),
+  ending: z.string().trim().max(400).default(''),
+  tips: z.array(z.string().trim().max(240)).max(8).default([]),
+});
+export type ReferenceStyle = z.infer<typeof ReferenceStyleSchema>;
+
+export const StyleGuideSchema = z.object({
+  guide: z.string().trim().min(20).max(4000),
+});

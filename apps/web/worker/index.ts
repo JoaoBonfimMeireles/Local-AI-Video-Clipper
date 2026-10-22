@@ -15,6 +15,7 @@ import {
   runProcess,
 } from '@clipper/shared/server';
 import { runPipeline } from './pipeline';
+import { runReferenceJob } from './references';
 import { runRevision } from './revise';
 
 loadRootEnv();
@@ -84,7 +85,11 @@ async function main() {
     }, 1500);
     const t0 = Date.now();
     try {
-      const { rendered, failed } = job.settings.revision ? await runRevision(job, ac.signal) : await runPipeline(job, ac.signal);
+      const { rendered, failed } = job.settings.analyzeReferences
+        ? await runReferenceJob(job, ac.signal)
+        : job.settings.revision
+          ? await runRevision(job, ac.signal)
+          : await runPipeline(job, ac.signal);
       const secs = ((Date.now() - t0) / 1000).toFixed(0);
       if (rendered === 0) {
         finishJob(job.id, 'failed', `Nenhum corte foi renderizado (${failed} falha(s)).`);
