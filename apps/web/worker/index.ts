@@ -15,6 +15,7 @@ import {
   runProcess,
 } from '@clipper/shared/server';
 import { runPipeline } from './pipeline';
+import { runRevision } from './revise';
 
 loadRootEnv();
 const POLL_MS = Number(process.env.WORKER_POLL_MS) || 2000;
@@ -83,7 +84,7 @@ async function main() {
     }, 1500);
     const t0 = Date.now();
     try {
-      const { rendered, failed } = await runPipeline(job, ac.signal);
+      const { rendered, failed } = job.settings.revision ? await runRevision(job, ac.signal) : await runPipeline(job, ac.signal);
       const secs = ((Date.now() - t0) / 1000).toFixed(0);
       if (rendered === 0) {
         finishJob(job.id, 'failed', `Nenhum corte foi renderizado (${failed} falha(s)).`);

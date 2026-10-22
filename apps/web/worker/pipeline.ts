@@ -26,7 +26,7 @@ import {
   type ClipCandidate,
   type ClipSegment,
 } from '@clipper/clip-selection';
-import { buildCatalog, detectFacecam, heuristicEdit, shortlistLibrary, heuristicShots, normalizeEdit, refineShots, resolveEdit, type AssetMeta, type ClipEdit, type ResolvedEdit, type VideoKnowledge } from '@clipper/editing-planner';
+import { buildCatalog, detectFacecam, findAssetsByKeywords, heuristicEdit, shortlistLibrary, type ClipLayout, heuristicShots, normalizeEdit, refineShots, resolveEdit, type AssetMeta, type ClipEdit, type ResolvedEdit, type VideoKnowledge } from '@clipper/editing-planner';
 import { creditLine, flattenWords, formatTimestamp, slugify, TWITCH_CATEGORIES, type AppSettings, type Job, type JobResult, type PipelineStep, type ProbeInfo, type Transcript, type TranscriptWord } from '@clipper/shared';
 import {
   addJobLog,
@@ -252,14 +252,37 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
   let knowledge: VideoKnowledge | null = null;
   if (llm) {
     // A análise de live (Twitch) tem outro olhar e outras categorias: cache separado por modo
-    const kFile = `${cacheBase}.knowledge${s.mode === 'twitch' ? '-twitch' : ''}.json`;
+    // v2: análise de live mais densa (≈1 momento/30s) e com picos de volume — invalida análises antigas mais rasas
+    const kFile = `${cacheBase}.knowledge${s.mode === 'twitch' ? '-twitch-v2' : ''}.json`;
     if (fs.existsSync(kFile)) {
       knowledge = JSON.parse(fs.readFileSync(kFile, 'utf8')) as VideoKnowledge;
       log('info', `Conhecimento do vídeo reaproveitado do cache (${knowledge.moments.length} momentos) — sem reenviar transcrição e frames`);
     } else {
       try {
         log('info', `Analisando o vídeo com ${llm.model} (transcrição${app.sendFramesToAI ? ' + frames' : ''}); o resultado fica em cache`);
-        knowledge = await aiAnalyzeVideo({ llm, transcript, videoDuration: info.duration, frames, sendImages: app.sendFramesToAI, mode: s.mode, signal, log: (l, m) => log(l, m) });
+        // Lives: os 40 maiores picos de volume (gritos, risadas, sustos) viram pistas textuais baratas para a IA
+        const audioPeaks =
+          s.mode === 'twitch'
+            ? findEnergyPeaks(energy, 1.0, 8)
+                .sort((a, b) => energy[b] - energy[a])
+                .slice(0, 40)
+                .sort((a, b) => a - b)
+            : undefined;
+        // Trechos agitados: janelas de 20s com mais trocas de cena e áudio mais alto (pistas baratas, só texto)
+        const activeWindows =
+          s.mode === 'twitch'
+            ? Array.from({ length: Math.floor(info.duration / 20) }, (_, i) => {
+                const a = i * 20;
+                const cuts = scenes.filter((t) => t >= a && t < a + 20).length;
+                const vol = energy.slice(a, a + 20).filter((e) => e > -60);
+                const loud = vol.length ? vol.reduce((x, y) => x + y, 0) / vol.length : -60;
+                return { start: a, end: a + 20, score: cuts * 2 + (loud + 60) / 4 };
+              })
+                .sort((x, y) => y.score - x.score)
+                .slice(0, 10)
+                .sort((x, y) => x.start - y.start)
+            : undefined;
+        knowledge = await aiAnalyzeVideo({ llm, transcript, videoDuration: info.duration, frames, sendImages: app.sendFramesToAI, mode: s.mode, audioPeaks, activeWindows, signal, log: (l, m) => log(l, m) });
         fs.mkdirSync(path.dirname(kFile), { recursive: true });
         fs.writeFileSync(kFile, JSON.stringify(knowledge));
         log('info', `Análise concluída: ${knowledge.speakers.length} pessoa(s), ${knowledge.moments.length} momentos`);
@@ -274,16 +297,57 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
   const sentences = buildSentences(transcript);
   /** Alinha cada trecho a frases inteiras e limita a duração total (somando os trechos). */
   const tidy = (c: ClipCandidate): ClipCandidate => {
-    let segs = segmentsOf(c).map((sg) => snapToSentences(sg.start, sg.end, sentences, info.duration));
-    const maxDur = s.targetDuration * 1.6;
+    let segs = segmentsOf(c).map((sg) => ({ ...snapToSentences(sg.start, sg.end, sentences, info.duration), label: sg.label }));
+    // Trechos que se encostam ou se sobrepõem (na ordem de exibição) viram um só: evita repetir fala
+    segs = segs.reduce<typeof segs>((acc, sg) => {
+      const prev = acc[acc.length - 1];
+      if (prev && sg.start <= prev.end + 1.5 && sg.end > prev.start) prev.end = Math.max(prev.end, sg.end);
+      else acc.push({ ...sg });
+      return acc;
+    }, []);
+    // Lives: liberdade para estender e fechar o raciocínio; compilação Top 5 tem 5 momentos completos
+    // Top 5: sem momentos repetidos e cada um com no máximo ~15s (terminando no fim de uma frase)
+    if (c.category === 'top5') {
+      const unique: typeof segs = [];
+      for (const sg of segs) {
+        const dup = unique.some((u) => Math.min(u.end, sg.end) - Math.max(u.start, sg.start) > 0.5 * Math.min(u.end - u.start, sg.end - sg.start));
+        if (!dup) unique.push(sg);
+      }
+      if (unique.length < segs.length) log('info', `Top 5: ${segs.length - unique.length} momento(s) repetido(s) removido(s)`);
+      segs = unique.slice(0, 5).map((sg) => (sg.end - sg.start > 16 ? { ...snapToSentences(sg.start, sg.start + 15, sentences, info.duration), label: sg.label } : sg));
+    }
+    const maxDur = s.targetDuration * (c.category === 'top5' ? 2.5 : s.mode === 'twitch' ? 2.5 : 1.6);
     const total = () => segs.reduce((a, sg) => a + (sg.end - sg.start), 0);
+    // Corte normal curto demais (momento solto de 7-10s) ganha contexto antes e depois, em frases inteiras.
+    // Compilações (top5) são feitas de trechos curtos de propósito.
+    const minDur = Math.min(25, s.targetDuration * 0.4);
+    if (c.category !== 'top5' && total() < minDur) {
+      const before = total();
+      // Soma frases INTEIRAS vizinhas (depois e antes, alternando) até atingir o mínimo
+      const k = segs.length === 1 ? 0 : segs.length - 1;
+      let i0 = sentences.findIndex((x) => x.end > segs[k].start + 0.3);
+      let i1 = sentences.length - 1 - [...sentences].reverse().findIndex((x) => x.start < segs[k].end - 0.3);
+      if (i0 < 0) i0 = 0;
+      if (i1 >= sentences.length || i1 < i0) i1 = i0;
+      let turn = 0;
+      const span = () => total() - (segs[k].end - segs[k].start) + (sentences[i1].end - sentences[i0].start);
+      while (span() < minDur && (i0 > 0 || i1 < sentences.length - 1)) {
+        const after = turn++ % 3 !== 2; // 2 frases depois para cada 1 antes: o contexto vem mais da sequência
+        if ((after && i1 < sentences.length - 1) || i0 === 0) i1++;
+        else if (k === 0) i0--;
+        else i1++;
+      }
+      segs[k] = { start: Math.max(0, sentences[i0].start - 0.15), end: Math.min(info.duration, sentences[i1].end + 0.3), label: segs[k].label };
+      log('info', `Corte "${c.title}" tinha só ${before.toFixed(0)}s; ganhou contexto (${total().toFixed(0)}s)`);
+    }
     if (total() > maxDur) {
       const before = total();
-      while (segs.length > 1 && total() - (segs[segs.length - 1].end - segs[segs.length - 1].start) >= s.targetDuration * 0.6) segs = segs.slice(0, -1);
+      // O Top 5 precisa dos 5 momentos: nunca descarta trechos dele
+      while (c.category !== 'top5' && segs.length > 1 && total() - (segs[segs.length - 1].end - segs[segs.length - 1].start) >= s.targetDuration * 0.6) segs = segs.slice(0, -1);
       if (total() > maxDur) {
         const last = segs[segs.length - 1];
-        const budget = s.targetDuration * 1.5 - (total() - (last.end - last.start));
-        segs[segs.length - 1] = snapToSentences(last.start, last.start + Math.max(5, budget), sentences, info.duration);
+        const budget = maxDur * 0.95 - (total() - (last.end - last.start));
+        segs[segs.length - 1] = { ...snapToSentences(last.start, last.start + Math.max(5, budget), sentences, info.duration), label: last.label };
       }
       log('info', `Corte "${c.title}" tinha ${before.toFixed(0)}s; ajustado para ${total().toFixed(0)}s`);
     }
@@ -313,7 +377,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       log('info', `Heurística gerou ${candidates.length} candidatos`);
     }
     fs.writeFileSync(path.join(tempDir, 'candidates.json'), JSON.stringify(candidates));
-    const picked = selectClips(candidates, { maxClips: s.maxClips, videoDuration: info.duration, targetDuration: s.targetDuration, minScore: llm ? 60 : 55 });
+    const picked = selectClips(candidates, { maxClips: s.maxClips, videoDuration: info.duration, targetDuration: s.targetDuration, minScore: llm ? 60 : 55, minClips: 5 });
     return picked.map((c, index) => ({ ...c, segments: segmentsOf(c), index }));
   });
   if (!selected.length) throw new Error('Nenhum corte selecionado.');
@@ -374,11 +438,6 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
     // Frames a cada 1s + rostos (YuNet local) + cortes de câmera do original, na linha do tempo de cada corte
     const visual = new Map<number, { frames: { time: number; path: string; faces: DetectedFace[] }[]; cuts: number[] }>();
     for (const c of selected) {
-      if (splitLayout) {
-        // Layout facecam + jogo é fixo: não precisa de análise de enquadramento
-        visual.set(c.index, { frames: [], cuts: [] });
-        continue;
-      }
       const dense = await extractClipFramesFps(job.inputPath, c.segments, usableDir(path.join(tempDir, `clipframes_${c.index}`)), { fps: 1, signal });
       const faces = await detectFaces(dense.map((f) => f.path), signal);
       const cuts: number[] = [];
@@ -390,6 +449,18 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       });
       visual.set(c.index, { frames: dense.map((f, i) => ({ ...f, faces: faces[i] ?? [] })), cuts: cuts.map((t) => Number(t.toFixed(2))) });
     }
+    // Lives: layout decidido POR CORTE (a facecam pode aparecer só em parte da live).
+    // facecam visível → facecam + jogo; gameplay sem rosto grande → jogo inteiro, sem zooms; rosto grande → IRL (por pessoa)
+    const layouts = new Map<number, ClipLayout>();
+    for (const c of selected) {
+      if (s.mode !== 'twitch') continue;
+      const v = visual.get(c.index)!;
+      const cam = verticalOut && s.twitchLayout !== 'full' ? detectFacecam(v.frames.map((f) => f.faces), 0.75) ?? (s.twitchLayout === 'split' ? splitLayout?.cam ?? null : null) : null;
+      const bigFace = v.frames.some((f) => f.faces.some((x) => x.w > 0.15));
+      layouts.set(c.index, { cam, gameplay: !cam && !bigFace });
+      log('info', `Corte ${c.index + 1}: layout ${cam ? 'facecam + jogo' : !bigFace ? 'jogo inteiro (gameplay)' : 'IRL (enquadramento por pessoa)'}`);
+    }
+    const fixedLayout = (i: number) => !!(layouts.get(i)?.cam || layouts.get(i)?.gameplay);
     const facesFound = [...visual.values()].reduce((a, v) => a + v.frames.filter((f) => f.faces.length).length, 0);
     log('info', `Análise visual local: ${facesFound} frames com rostos detectados, ${[...visual.values()].reduce((a, v) => a + v.cuts.length, 0)} cortes de câmera nos trechos`);
     let aiEdits = new Map<number, ClipEdit>();
@@ -397,8 +468,10 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       try {
         // Imagens para a IA: o 1º frame após cada corte de câmera + amostras regulares, com os rostos descritos
         const clipFrames = new Map<number, { time: number; path: string; note?: string }[]>();
-        if (!splitLayout && app.sendFramesToAI && editLlm.supportsImages) {
+        if (app.sendFramesToAI && editLlm.supportsImages) {
           for (const c of selected) {
+            // Layout fixo (facecam/jogo inteiro) não precisa de imagens para enquadrar: economiza tokens
+            if (fixedLayout(c.index)) continue;
             const v = visual.get(c.index)!;
             const pick = new Set<number>();
             for (const cut of [0, ...v.cuts]) {
@@ -426,7 +499,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
           knowledge,
           sendImages: app.sendFramesToAI,
           assetMeta,
-          splitLayout: !!splitLayout,
+          splitLayout: selected.every((c) => fixedLayout(c.index)),
           catalog: catalog.text,
           signal,
           log: (l, m) => log(l, m),
@@ -455,14 +528,25 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       // A IA decide quem/o que enquadrar; a detecção local de rostos corrige onde está, cena a cena
       const v = visual.get(c.index)!;
       const ctx = { duration, cuts: v.cuts, frames: v.frames };
-      edit.shots = splitLayout
+      edit.shots = fixedLayout(c.index)
         ? []
         : edit.shots.length
         ? refineShots(edit.shots, ctx)
         : s.format === 'original'
           ? []
           : heuristicShots({ ...ctx, preferWide: s.format !== 'vertical_crop' || s.intensity === 'low' });
-      const resolved = resolveEdit(edit, library, seed);
+      const resolved: ResolvedEdit = { ...resolveEdit(edit, library, seed), layout: layouts.get(c.index) };
+      // Trechos emendados: whoosh na transição (o flash é aplicado no render)
+      if (c.segments.length > 1 && s.useSfx) {
+        let off = 0;
+        for (const sg of c.segments.slice(0, -1)) {
+          off += sg.end - sg.start;
+          if (resolved.sfx.some((x) => Math.abs(x.at - off) < 0.6)) continue;
+          const w = findAssetsByKeywords(library, 'audio', ['whoosh', 'swoosh', 'woosh', 'transition', 'swipe'])[0];
+          const full = w ? resolveLibraryFile(library, 'audio', w.category, w.file) : null;
+          if (full) resolved.sfx.push({ category: w!.category, file: full, fileName: w!.file, at: Math.max(0, off - 0.2), volume: 0.55, duration: 1.2 });
+        }
+      }
       for (const w of resolved.warnings) log('warn', `Corte ${c.index + 1}: ${w}`);
       return resolved;
     });
@@ -587,7 +671,13 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       }
       // No layout facecam + jogo a legenda fica na emenda entre as duas partes
       const ass = s.burnSubtitles
-        ? buildAss(translatedWords ?? words, { width: canvas.width, height: canvas.height, intensity: s.intensity, baseline: splitLayout ? 0.53 : undefined })
+        ? buildAss(translatedWords ?? words, {
+            width: canvas.width,
+            height: canvas.height,
+            intensity: s.intensity,
+            baseline: edit.layout?.cam ? 0.53 : undefined,
+            rankCards: c.category === 'top5' ? rankCardsFor(c.segments) : undefined,
+          })
         : undefined;
       const workDir = usableDir(path.join(tempDir, `render_${n}`));
 
@@ -606,10 +696,12 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         start,
         end: start + duration,
         source: input === job.inputPath ? info : { ...info, hasAudio: true },
-        format: s.format,
+        // Gameplay sem facecam: o jogo inteiro na tela (fundo desfocado), nunca um recorte do meio do jogo
+        format: edit.layout?.gameplay && s.format === 'vertical_crop' ? 'vertical_blur' : s.format,
+        flashAt: c.segments.length > 1 ? c.segments.slice(0, -1).reduce<number[]>((acc, sg) => [...acc, (acc[acc.length - 1] ?? 0) + sg.end - sg.start], []) : [],
         shots: edit.shots,
         cleanArea,
-        split: splitLayout,
+        split: edit.layout?.cam ? { cam: edit.layout.cam } : null,
         zooms: edit.zooms,
         overlays: edit.overlays.map((o) => {
           const inf = assetInfo.get(o.file);
@@ -647,7 +739,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         index: c.index + 1,
         title: c.title,
         category: c.category ?? null,
-        layout: splitLayout ? 'facecam+jogo' : 'normal',
+        layout: edit.layout?.cam ? 'facecam+jogo' : edit.layout?.gameplay ? 'jogo inteiro' : 'normal',
         score: Math.round(c.score),
         reason: c.reason,
         hook: c.hook ?? null,
@@ -663,6 +755,18 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         subtitlesBurned: s.burnSubtitles,
         oldSubtitlesRemoved: !!subRegion,
         provider: result.provider,
+        // Tudo que é preciso para refazer SÓ este corte depois (ajuste por comentário), sem reprocessar o vídeo
+        renderContext: {
+          input: job.inputPath,
+          jobId: job.id,
+          clipIndex: c.index,
+          format: edit.layout?.gameplay && s.format === 'vertical_crop' ? 'vertical_blur' : s.format,
+          cleanArea,
+          inpaintRegion,
+          layout: edit.layout ?? null,
+          category: c.category ?? null,
+          segments: c.segments,
+        },
         edit: {
           shots: edit.shots,
           zooms: edit.zooms,
@@ -758,6 +862,16 @@ export function videoCacheBase(input: string, model: string, language: string): 
 
 export function transcriptCachePath(input: string, model: string, language: string): string {
   return `${videoCacheBase(input, model, language)}.json`;
+}
+
+/** Top 5: "#5 ... #1" durante cada trecho (contagem regressiva, o melhor por último). */
+export function rankCardsFor(segments: ClipSegment[]): { at: number; end: number; rank: number; label: string }[] {
+  let off = 0;
+  return segments.map((sg, i) => {
+    const card = { at: off + 0.1, end: off + Math.min(sg.end - sg.start, 4.5), rank: segments.length - i, label: sg.label ?? '' };
+    off += sg.end - sg.start;
+    return card;
+  });
 }
 
 /** "2 rostos: x=0.31, x=0.64 (close)" — dica textual para a IA junto de cada imagem. */

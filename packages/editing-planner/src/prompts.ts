@@ -26,7 +26,7 @@ em voz alta), as piadas internas, os sustos, as zoeiras e as interações com vi
 clipes. Esta análise será guardada e reutilizada para cortes diferentes: seja completo e preciso nos tempos.
 Escreva as descrições em português. Responda SOMENTE com JSON válido, sem comentários.`;
 
-export function buildAnalysisPrompt(args: { transcriptText: string; videoDuration: number; visualNotes?: string; chunkInfo?: string; mode?: 'youtube' | 'twitch' }): string {
+export function buildAnalysisPrompt(args: { transcriptText: string; videoDuration: number; visualNotes?: string; chunkInfo?: string; mode?: 'youtube' | 'twitch'; audioPeaks?: string; activeWindows?: string }): string {
   if (args.mode === 'twitch') return buildTwitchAnalysisPrompt(args);
   return `Vídeo com duração total de ${formatTimestamp(args.videoDuration)} (${args.videoDuration.toFixed(0)}s).
 ${args.chunkInfo ?? ''}
@@ -46,10 +46,12 @@ Regras: moments deve cobrir o vídeo INTEIRO em blocos de 5 a 40s, sem lacunas g
 início/fim de frases; strength (0-100) = potencial para viralizar isoladamente; position com x aproximado (0=esquerda, 1=direita).`;
 }
 
-function buildTwitchAnalysisPrompt(args: { transcriptText: string; videoDuration: number; visualNotes?: string; chunkInfo?: string }): string {
+function buildTwitchAnalysisPrompt(args: { transcriptText: string; videoDuration: number; visualNotes?: string; chunkInfo?: string; audioPeaks?: string; activeWindows?: string }): string {
+  const minMoments = Math.max(12, Math.round(args.videoDuration / 30));
   return `Live (VOD) com duração total de ${formatTimestamp(args.videoDuration)} (${args.videoDuration.toFixed(0)}s).
 ${args.chunkInfo ?? ''}
 ${args.visualNotes ? `Frames amostrados (as imagens anexadas seguem esta ordem):\n${args.visualNotes}\n` : ''}
+${args.audioPeaks ? `Picos de volume no áudio (gritos, risadas, sustos, euforia — ótimos candidatos a clipe): ${args.audioPeaks}\n` : ''}${args.activeWindows ? `Trechos mais agitados (muita ação na tela + áudio alto): ${args.activeWindows}\n` : ''}
 Transcrição com timestamps (segundos absolutos):
 ${args.transcriptText}
 
@@ -62,7 +64,8 @@ Retorne JSON neste formato:
    "topic":"assunto curto (ex.: banana, chefe final, donate do fulano)",
    "description":"o que acontece e por que é bom","quote":"frase literal curta","speaker":"S","strength":90,
    "visual":"o que aparece (ex.: jumpscare, streamer cai da cadeira, tela de game over)"}]}
-Regras: moments deve cobrir a live INTEIRA (blocos de 3 a 40s, sem lacunas grandes); use "topic" igual para trechos
+Regras: moments deve cobrir a live INTEIRA com pelo menos ${minMoments} momentos (≈1 a cada 30s; blocos de 3 a 40s, sem
+lacunas grandes) — momentos fracos também entram, com strength baixo; olhe com atenção os picos de volume; use "topic" igual para trechos
 sobre o mesmo assunto mesmo que separados no tempo (assim dá para juntar "banana" ignorando o desvio para "maçã");
 strength (0-100) = quanto esse momento renderia um clipe; chat = streamer lendo/respondendo viewer, donate, raid;
 roast = alguém zoando outra pessoa; scary = susto/tensão; highlight = jogada, clutch, fail épico.`;
@@ -88,7 +91,8 @@ ${moments}`;
 const TWITCH_CATEGORY_RULES: Record<string, string> = {
   funny: 'funny — os momentos MAIS engraçados (risada genuína, situação absurda, piada que funcionou)',
   scary: 'scary — sustos e tensão (jumpscare, grito, momento de pânico, quase morte no jogo)',
-  top5: 'top5 — UM corte compilação com os 5 momentos que mais chamaram atenção na live inteira: exatamente 5 trechos curtos (4-12s cada), em ordem crescente de impacto, o melhor por último',
+  top5: 'top5 — UM corte compilação "Top 5 melhores momentos": exatamente 5 trechos (5-15s cada, cada um com começo e desfecho), em contagem regressiva (o 5º melhor primeiro, o MELHOR por último). Cada trecho TEM "label": título curto do momento (máx. 30 caracteres), que aparece na tela ao lado do número',
+  reaction: 'reaction — o streamer reagindo a algo que VIU (no jogo, no chat, num vídeo, um fail de outro jogador) e achou engraçado/absurdo',
   chat: 'chat — interação com viewers (lendo/respondendo o chat de forma engraçada, donate, raid, pedido inusitado)',
   roast: 'roast — uma pessoa zoando a outra, provocações, alguém sendo humilhado de forma engraçada',
   quotes: 'quotes — falas marcantes isoladas (frase engraçada, polêmica, sem contexto que vira meme)',
@@ -100,7 +104,7 @@ function buildTwitchSelectionPrompt(args: { knowledge: VideoKnowledge; settings:
   const cats = (s.twitchCategories.length ? s.twitchCategories : Object.keys(TWITCH_CATEGORY_RULES)).map((c) => `- ${TWITCH_CATEGORY_RULES[c]}`).join('\n');
   const qty =
     s.maxClips === 'auto'
-      ? 'Quantidade: até 3 cortes por categoria, só se forem realmente bons (nota >= 60). Melhor poucos e ótimos.'
+      ? 'Quantidade: proponha de 8 a 12 cortes no total (fora o top5), espalhados pela live e entre as categorias; dê notas realistas (os melhores serão escolhidos, mínimo de 5).'
       : `Quantidade: até ${s.maxClips} cortes no total, distribuídos entre as categorias.`;
   return `Duração total da live: ${args.videoDuration.toFixed(0)}s.
 Duração desejada por corte: ~${s.targetDuration}s (flexível: entre ${Math.round(s.targetDuration * 0.5)}s e ${Math.round(s.targetDuration * 1.5)}s, somando os trechos).
@@ -118,9 +122,14 @@ Como um editor de clipes de Twitch:
 - Corte o tempo morto: silêncio, carregamento, o streamer lendo algo irrelevante. Comece no segundo que a coisa acontece
   (ou 2-4s antes, para dar contexto do susto/piada) e termine logo após a reação.
 - O corte precisa funcionar para quem não viu a live: se precisar de contexto, inclua um trecho curto que explica.
+- NUNCA termine no meio de um raciocínio, piada ou história: se a pessoa ainda está concluindo, estenda o corte até
+  o desfecho (pode passar bem da duração desejada). Começo e fim em frases completas.
+- Pense como editor de clipes: prefira os trechos mais agitados (picos de volume, muita ação), o comentário certeiro,
+  a sacada, a zoeira com o chat. Um "corte simples" de 10-20s com uma fala ótima também vale.
 
 Retorne JSON exatamente neste formato:
-{"clips":[{"category":"funny","segments":[{"start":812.3,"end":826.0},{"start":1490.2,"end":1502.8}],"score":88,"title":"título curto estilo clipe","reason":"por que é bom (e o que foi pulado, se pulou)","hook":"primeira fala"}]}
+{"clips":[{"category":"funny","segments":[{"start":812.3,"end":826.0},{"start":1490.2,"end":1502.8}],"score":88,"title":"título curto estilo clipe","reason":"por que é bom (e o que foi pulado, se pulou)","hook":"primeira fala"},
+ {"category":"top5","segments":[{"start":300.1,"end":311.0,"label":"O PC travou de novo"},{"start":901.2,"end":913.4,"label":"Neymar na call"}],"score":95,"title":"TOP 5 momentos da live","reason":"...","hook":"..."}]}
 Regras: tempos alinhados ao início/fim de frases (use os tempos dos momentos); cortes não repetem trechos entre si
 (exceto o top5, que pode reaproveitar os melhores momentos); score de 0 a 100.`;
 }
@@ -130,7 +139,7 @@ export function buildSelectionFromKnowledgePrompt(args: { knowledge: VideoKnowle
   const { settings: s } = args;
   const qty =
     s.maxClips === 'auto'
-      ? 'Quantidade: decida você — inclua apenas cortes realmente bons (nota >= 60). Seja crítico: melhor 2 ótimos que 6 medianos.'
+      ? 'Quantidade: proponha de 6 a 10 cortes espalhados pelo vídeo, com notas realistas (os melhores serão escolhidos, mínimo de 5 se o vídeo tiver material).'
       : `Quantidade: proponha até ${Math.min(60, (s.maxClips as number) * 2)} candidatos (serão escolhidos os ${s.maxClips} melhores).`;
   return `Duração total do vídeo: ${args.videoDuration.toFixed(0)}s.
 Duração desejada por corte: ~${s.targetDuration}s (flexível: entre ${Math.round(s.targetDuration * 0.6)}s e ${Math.round(s.targetDuration * 1.5)}s, somando os trechos).
@@ -321,4 +330,43 @@ export function buildTranslationPrompt(items: { id: number; text: string }[], ta
 Não junte nem divida itens. Retorne JSON: {"translations":[{"id":0,"text":"..."}]}
 
 ${JSON.stringify(items)}`;
+}
+
+export const REVISION_SYSTEM = `Você é o editor que fez este corte e recebeu um pedido de ajuste. Aplique EXATAMENTE o que foi
+pedido e mantenha todo o resto igual (mesmos memes, sons, zooms e textos que não foram citados). Use somente arquivos do
+catálogo (códigos m.., s..) ou os que já estavam no plano. Responda SOMENTE com JSON válido, sem comentários.`;
+
+export function buildRevisionPrompt(args: {
+  comment: string;
+  currentPlan: unknown;
+  segments: { start: number; end: number; label?: string | null }[];
+  duration: number;
+  transcript: string;
+  catalog: string;
+  language: string;
+}): string {
+  return `PEDIDO DO EDITOR (prioridade máxima):
+"""
+${args.comment.slice(0, 2000)}
+"""
+
+Corte atual: ${args.duration.toFixed(1)}s, montado com estes trechos do vídeo original (tempos absolutos):
+${JSON.stringify(args.segments)}
+
+Transcrição do corte (tempos RELATIVOS ao início do corte):
+${args.transcript}
+
+Plano atual (tempos relativos; "file" são nomes de arquivo — pode mantê-los):
+${JSON.stringify(args.currentPlan)}
+
+Catálogo disponível (pré-selecionado para este corte; use os CÓDIGOS em "file" para trocar/adicionar):
+${args.catalog}
+
+Retorne o plano COMPLETO revisado neste formato (mesmo do plano atual):
+{"segments":null,"shots":[...],"zooms":[...],"overlays":[{"type":"meme","file":"m3","at":4.2,"duration":2,"position":"center","scale":0.7,"audioMode":"both","reason":"..."}],
+ "sfx":[{"file":"s2","at":4.2,"volume":0.8,"reason":"..."}],"emphasisWords":[...],"title":"...","description":"...","hashtags":[...],
+ "changes":"o que você mudou"}
+Regras: só preencha "segments" (tempos ABSOLUTOS do vídeo original) se o pedido mudar começo, fim ou trechos do corte
+(ex.: "começa 5s antes" → start do primeiro trecho - 5); senão use null. Se mudar os trechos, ajuste os tempos dos
+memes/sons para a nova linha do tempo. Textos (title/description/hashtags) no idioma "${args.language}".`;
 }

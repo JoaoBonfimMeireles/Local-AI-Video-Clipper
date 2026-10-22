@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { ArrowLeft, Ban, Check, CheckCircle2, Circle, CircleDot, Clapperboard, Copy, Download, FileJson, FileText, FolderOpen, RotateCcw, XCircle } from 'lucide-react';
+import { ArrowLeft, Ban, Check, CheckCircle2, Circle, CircleDot, Clapperboard, Copy, Download, PenLine, FileJson, FileText, FolderOpen, RotateCcw, XCircle } from 'lucide-react';
 import { formatTimestamp, PIPELINE_STEPS, type Clip, type Job, type JobLog } from '@clipper/shared';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -269,13 +269,123 @@ function PostText({ clip }: { clip: Clip }) {
   );
 }
 
+/** "Ai-cat-laughing-Meme-Green-Screen.mp4" → "Ai cat laughing" (versão leve para o navegador). */
+function prettyName(file: string): string {
+  let name = file.replace(/\.[a-z0-9]{2,4}$/i, '');
+  try {
+    if (/%[0-9a-f]{2}/i.test(name)) name = decodeURIComponent(name);
+  } catch {
+    /* nome com % truncado */
+  }
+  return name
+    .split(/[\s\-_]+/)
+    .filter((w) => w && !/^(meme|green|screen|greenscreen|template|small)$/i.test(w))
+    .join(' ');
+}
+
+interface ClipMeta {
+  edit?: {
+    overlays?: { file: string; at: number; audioMode?: string; reason?: string }[];
+    sfx?: { file: string; at: number; reason?: string }[];
+  };
+  revision?: { version: number; comment: string; changes?: string | null };
+}
+
+const AUDIO_MODE: Record<string, string> = { meme: 'só o som do meme', video: 'meme mudo', both: 'meme + vídeo' };
+
+/** Memes e sons que entraram no corte, com o momento e o motivo. */
+function ClipAssets({ metadataPath }: { metadataPath: string }) {
+  const [meta, setMeta] = useState<ClipMeta | null>(null);
+  useEffect(() => {
+    fetch(fileUrl(metadataPath))
+      .then((r) => (r.ok ? r.json() : null))
+      .then(setMeta)
+      .catch(() => undefined);
+  }, [metadataPath]);
+  if (!meta) return null;
+  const memes = meta.edit?.overlays ?? [];
+  const sounds = meta.edit?.sfx ?? [];
+  return (
+    <details className="rounded-md border px-2 py-1.5 text-xs">
+      <summary className="cursor-pointer">
+        {memes.length} meme(s) · {sounds.length} som(ns)
+        {meta.revision ? <span className="ml-2 text-primary">versão {meta.revision.version}</span> : null}
+      </summary>
+      <ul className="mt-1.5 space-y-1">
+        {memes.map((m, i) => (
+          <li key={`m${i}`} title={m.reason}>
+            🎬 <span className="font-medium">{prettyName(m.file)}</span> <span className="text-muted-foreground">em {m.at.toFixed(1)}s{m.audioMode ? ` · ${AUDIO_MODE[m.audioMode] ?? m.audioMode}` : ''}</span>
+            <div className="truncate pl-5 font-mono text-[10px] text-muted-foreground">{m.file}</div>
+          </li>
+        ))}
+        {sounds.map((x, i) => (
+          <li key={`s${i}`} title={x.reason}>
+            🔊 <span className="font-medium">{prettyName(x.file)}</span> <span className="text-muted-foreground">em {x.at.toFixed(1)}s</span>
+            <div className="truncate pl-5 font-mono text-[10px] text-muted-foreground">{x.file}</div>
+          </li>
+        ))}
+        {!memes.length && !sounds.length && <li className="text-muted-foreground">nenhum</li>}
+      </ul>
+      {meta.revision && <p className="mt-1.5 text-muted-foreground">Último ajuste: “{meta.revision.comment}”{meta.revision.changes ? ` → ${meta.revision.changes}` : ''}</p>}
+    </details>
+  );
+}
+
+/** Pedido de ajuste em um corte pronto: refaz só este corte (barato), sem reprocessar o vídeo. */
+function ReviseBox({ clip }: { clip: Clip }) {
+  const [open, setOpen] = useState(false);
+  const [comment, setComment] = useState('');
+  const [state, setState] = useState<{ ok: boolean; text: string } | null>(null);
+  const [sending, setSending] = useState(false);
+  async function send() {
+    setSending(true);
+    setState(null);
+    try {
+      await api(`/api/jobs/${clip.jobId}/clips/${clip.index}/revise`, { method: 'POST', body: JSON.stringify({ comment }) });
+      setState({ ok: true, text: 'Ajuste na fila. A nova versão substitui este vídeo aqui quando ficar pronta (a anterior fica salva na pasta).' });
+      setComment('');
+    } catch (e) {
+      setState({ ok: false, text: (e as Error).message });
+    } finally {
+      setSending(false);
+    }
+  }
+  if (!open)
+    return (
+      <Button variant="outline" size="sm" className="w-full" onClick={() => setOpen(true)}>
+        <PenLine /> Pedir ajuste neste corte
+      </Button>
+    );
+  return (
+    <div className="space-y-1.5 rounded-md border p-2">
+      <textarea
+        value={comment}
+        onChange={(e) => setComment(e.target.value)}
+        rows={3}
+        maxLength={2000}
+        placeholder="Ex.: tira o meme do gato e coloca um de susto aos 12s; começa 5s antes; som de risada mais baixo; título mais curto"
+        className="w-full rounded-md border border-input bg-transparent px-2 py-1.5 text-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      />
+      <div className="flex gap-1.5">
+        <Button size="sm" onClick={send} disabled={sending || comment.trim().length < 3}>
+          {sending ? 'Enviando…' : 'Refazer este corte'}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>
+          Cancelar
+        </Button>
+      </div>
+      {state && <p className={cn('text-xs', state.ok ? 'text-success' : 'text-destructive')}>{state.text}</p>}
+    </div>
+  );
+}
+
 function ClipCard({ clip }: { clip: Clip }) {
   const thumb = clip.outputPath?.replace(/\.mp4$/, '.jpg');
   return (
     <Card className="overflow-hidden">
       <div className="grid aspect-video place-items-center bg-black/50">
         {clip.status === 'completed' && clip.outputPath ? (
-          <video src={fileUrl(clip.outputPath)} poster={thumb ? fileUrl(thumb) : undefined} controls preload="none" className="h-full max-h-[420px] w-full object-contain" />
+          <video key={clip.outputPath} src={fileUrl(clip.outputPath)} poster={thumb ? fileUrl(thumb) : undefined} controls preload="none" className="h-full max-h-[420px] w-full object-contain" />
         ) : clip.status === 'failed' ? (
           <XCircle className="size-8 text-destructive" />
         ) : (
@@ -293,6 +403,8 @@ function ClipCard({ clip }: { clip: Clip }) {
         </p>
         {clip.reason && <p className="line-clamp-3 text-xs text-muted-foreground">{clip.reason}</p>}
         {(clip.description || clip.hashtags.length > 0) && <PostText clip={clip} />}
+        {clip.status === 'completed' && clip.metadataPath && <ClipAssets key={clip.metadataPath} metadataPath={clip.metadataPath} />}
+        {clip.status === 'completed' && <ReviseBox clip={clip} />}
         {clip.error && <p className="line-clamp-4 text-xs whitespace-pre-wrap text-destructive">{clip.error}</p>}
         {clip.status === 'completed' && clip.outputPath && (
           <div className="flex flex-wrap gap-1.5 pt-1">

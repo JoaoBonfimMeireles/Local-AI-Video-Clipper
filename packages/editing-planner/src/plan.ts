@@ -278,8 +278,15 @@ export interface ResolvedSfx extends Omit<Sfx, 'file'> {
   file: string;
   fileName: string;
 }
+/** Layout de um corte de live: facecam (caixa no quadro original) ou gameplay sem facecam. */
+export interface ClipLayout {
+  cam: { x0: number; y0: number; x1: number; y1: number } | null;
+  gameplay: boolean;
+}
+
 export interface ResolvedEdit {
   clipIndex: number;
+  layout?: ClipLayout;
   shots: Shot[];
   zooms: Zoom[];
   overlays: ResolvedOverlay[];
@@ -352,9 +359,13 @@ export function resolveEdit(edit: ClipEdit, library: LibraryIndex, seed: string)
  * Facecam de live: um rosto PEQUENO que aparece na mesma posição, perto de uma borda/canto, na maioria
  * dos frames amostrados. Retorna a caixa estimada da câmera (frações do quadro) ou null (IRL, sem cam).
  */
-export function detectFacecam(framesFaces: { x: number; y: number; w: number; h: number }[][]): { x0: number; y0: number; x1: number; y1: number } | null {
+export function detectFacecam(
+  framesFaces: { x: number; y: number; w: number; h: number }[][],
+  /** Fração mínima dos frames em que a facecam precisa aparecer (num corte, use alta: ela tem de estar lá o tempo todo). */
+  minShare = 0.4,
+): { x0: number; y0: number; x1: number; y1: number } | null {
   const valid = framesFaces.filter((f) => f.length);
-  if (framesFaces.length < 4 || valid.length < framesFaces.length * 0.35) return null;
+  if (framesFaces.length < 4 || valid.length < framesFaces.length * Math.min(0.35, minShare)) return null;
   const buckets = new Map<string, { x: number; y: number; w: number; h: number }[]>();
   for (const faces of framesFaces) {
     const seen = new Set<string>();
@@ -367,7 +378,7 @@ export function detectFacecam(framesFaces: { x: number; y: number; w: number; h:
     }
   }
   const best = [...buckets.values()].sort((a, b) => b.length - a.length)[0];
-  if (!best || best.length < framesFaces.length * 0.4) return null;
+  if (!best || best.length < framesFaces.length * minShare) return null;
   const med = (k: 'x' | 'y' | 'w' | 'h') => best.map((f) => f[k]).sort((a, b) => a - b)[Math.floor(best.length / 2)];
   const cx = med('x');
   const cy = med('y');

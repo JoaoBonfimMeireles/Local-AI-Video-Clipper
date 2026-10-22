@@ -15,7 +15,7 @@ export const JobSettingsSchema = z.object({
   useMemes: z.boolean(),
   useSfx: z.boolean(),
   mode: z.enum(['youtube', 'twitch']).default('youtube'),
-  twitchCategories: z.array(z.enum(['funny', 'scary', 'top5', 'chat', 'roast', 'quotes', 'highlights'])).max(7).default([]),
+  twitchCategories: z.array(z.enum(['funny', 'scary', 'top5', 'chat', 'roast', 'quotes', 'highlights', 'reaction'])).max(8).default([]),
   twitchLayout: z.enum(['auto', 'split', 'full']).default('auto'),
   creditTitle: z.string().trim().max(300).default(''),
   creditChannel: z.string().trim().max(200).default(''),

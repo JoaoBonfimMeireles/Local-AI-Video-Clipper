@@ -203,6 +203,10 @@ export async function aiAnalyzeVideo(args: {
   frames?: FrameRef[];
   sendImages: boolean;
   mode?: 'youtube' | 'twitch';
+  /** Picos de volume (segundos absolutos) — pistas de gritos/risadas para lives. */
+  audioPeaks?: number[];
+  /** Janelas mais agitadas (muitas trocas de cena + áudio alto), em segundos absolutos. */
+  activeWindows?: { start: number; end: number }[];
   log: Log;
   signal?: AbortSignal;
 }): Promise<VideoKnowledge> {
@@ -220,6 +224,8 @@ export async function aiAnalyzeVideo(args: {
           system: args.mode === 'twitch' ? ANALYSIS_SYSTEM_TWITCH : ANALYSIS_SYSTEM,
           prompt: buildAnalysisPrompt({
             mode: args.mode,
+            audioPeaks: (args.audioPeaks ?? []).filter((t) => t >= chunk.from && t <= chunk.to).map((t) => `${t.toFixed(0)}s`).join(', ') || undefined,
+            activeWindows: (args.activeWindows ?? []).filter((w) => w.end >= chunk.from && w.start <= chunk.to).map((w) => `${w.start.toFixed(0)}-${w.end.toFixed(0)}s`).join(', ') || undefined,
             transcriptText: chunk.text,
             videoDuration: args.videoDuration,
             visualNotes: useImages ? visualNotes : undefined,
@@ -270,7 +276,7 @@ export async function aiSelectFromKnowledge(args: {
   return res.clips.map((x) => ({
     start: x.start,
     end: Math.min(x.end, args.videoDuration),
-    segments: x.segments.map((sg) => ({ start: sg.start, end: Math.min(sg.end, args.videoDuration) })).filter((sg) => sg.end > sg.start + 1),
+    segments: x.segments.map((sg) => ({ start: sg.start, end: Math.min(sg.end, args.videoDuration), label: sg.label ?? null })).filter((sg) => sg.end > sg.start + 1),
     score: x.score,
     title: x.title,
     reason: x.reason,
@@ -280,7 +286,7 @@ export async function aiSelectFromKnowledge(args: {
 }
 
 /** Texto com tempos relativos agrupado em frases de ~8 palavras: "[3.2] palavras ...". */
-function wordsToTimedText(words: TranscriptWord[]): string {
+export function wordsToTimedText(words: TranscriptWord[]): string {
   const lines: string[] = [];
   for (let i = 0; i < words.length; i += 8) {
     const g = words.slice(i, i + 8);

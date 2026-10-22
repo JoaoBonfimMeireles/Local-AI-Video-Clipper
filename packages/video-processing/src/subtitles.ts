@@ -12,6 +12,8 @@ export interface AssOptions {
   intensity: Intensity;
   /** Fração da altura onde fica a base da legenda (0 = topo, 1 = base). */
   baseline?: number;
+  /** Cartões de ranking (Top 5): número grande + título curto, no lado esquerdo, durante cada momento. */
+  rankCards?: { at: number; end: number; rank: number; label: string }[];
 }
 
 const HIGHLIGHT = '&H0000E5FF&'; // amarelo (ASS usa BGR)
@@ -129,6 +131,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       const fadeIn = i === 0 ? '{\\fad(60,0)}' : '';
       lines.push(`Dialogue: 0,${assTime(start)},${assTime(end)},Main,,0,0,0,,${fadeIn}${body}`);
     }
+  }
+  // Ranking do Top 5: "#3" grande + título do momento, alinhado à esquerda na parte de cima
+  for (const r of opts.rankCards ?? []) {
+    const label = escapeAss(r.label).toUpperCase().slice(0, 40);
+    const num = Math.round(fontSize * 1.9);
+    const sub = Math.round(fontSize * 0.8);
+    const x = Math.round(W * 0.05);
+    const y = Math.round(H * (vertical ? 0.16 : 0.12));
+    lines.push(
+      `Dialogue: 1,${assTime(r.at)},${assTime(r.end)},Main,,0,0,0,,{\\an7\\pos(${x},${y})\\fad(150,150)\\fs${num}\\c${HIGHLIGHT}\\bord${outline + 2}}#${r.rank}{\\fs${sub}\\c${WHITE}\\bord${outline}}\\N${label}`,
+    );
   }
   return header + lines.join('\n') + '\n';
 }

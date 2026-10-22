@@ -10,8 +10,9 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="pt-BR">
-      <body className="min-h-screen antialiased">
+    // suppressHydrationWarning: extensões do navegador (ex.: ColorZilla) injetam atributos no <html>/<body>
+    <html lang="pt-BR" suppressHydrationWarning>
+      <body className="min-h-screen antialiased" suppressHydrationWarning>
         <header className="sticky top-0 z-20 border-b bg-background/80 backdrop-blur">
           <div className="mx-auto flex h-14 max-w-7xl items-center gap-6 px-4">
             <Link href="/" className="flex items-center gap-2 font-semibold">

@@ -6,7 +6,7 @@ export type ClipStatus = 'pending' | 'rendering' | 'completed' | 'failed';
 export type Intensity = 'low' | 'medium' | 'high';
 /** youtube: podcasts/entrevistas/vlogs. twitch: lives (jogos, IRL, interação com chat). */
 export type ContentMode = 'youtube' | 'twitch';
-export type TwitchCategory = 'funny' | 'scary' | 'top5' | 'chat' | 'roast' | 'quotes' | 'highlights';
+export type TwitchCategory = 'funny' | 'scary' | 'top5' | 'chat' | 'roast' | 'quotes' | 'highlights' | 'reaction';
 /** auto: detecta facecam; split: facecam em cima + jogo embaixo; full: enquadramento normal. */
 export type TwitchLayout = 'auto' | 'split' | 'full';
 
@@ -18,6 +18,7 @@ export const TWITCH_CATEGORIES: { key: TwitchCategory; label: string; desc: stri
   { key: 'roast', label: 'Zoeira entre pessoas', desc: 'um zoando o outro, provocações' },
   { key: 'quotes', label: 'Falas marcantes', desc: 'frases engraçadas, polêmicas ou memoráveis' },
   { key: 'highlights', label: 'Jogadas e destaques', desc: 'clutches, fails épicos, momentos de skill' },
+  { key: 'reaction', label: 'Reações', desc: 'o streamer reagindo a algo que viu e achou engraçado' },
 ];
 
 export type OutputFormat = 'original' | 'vertical_blur' | 'vertical_crop' | 'square';
@@ -47,6 +48,8 @@ export interface JobSettings {
   creditChannel: string;
   creditUrl: string;
   mode: ContentMode;
+  /** Job de AJUSTE: refaz só um corte já pronto a partir de um comentário (não reprocessa o vídeo). */
+  revision?: { parentJobId: string; clipIndex: number; comment: string } | null;
   /** Modo Twitch: quais tipos de momento procurar. */
   twitchCategories: TwitchCategory[];
   twitchLayout: TwitchLayout;
@@ -105,7 +108,7 @@ export const DEFAULT_JOB_SETTINGS: JobSettings = {
   creditChannel: '',
   creditUrl: '',
   mode: 'youtube',
-  twitchCategories: ['funny', 'scary', 'top5', 'chat', 'roast', 'quotes', 'highlights'],
+  twitchCategories: ['funny', 'scary', 'top5', 'chat', 'roast', 'quotes', 'highlights', 'reaction'],
   twitchLayout: 'auto',
 };
 

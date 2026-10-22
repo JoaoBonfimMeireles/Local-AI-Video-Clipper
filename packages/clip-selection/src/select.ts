@@ -16,6 +16,8 @@ export interface SelectOptions {
   minScore?: number;
   /** Sobreposição máxima tolerada (fração do menor corte). */
   maxOverlap?: number;
+  /** Modo automático: garante pelo menos esta quantidade (se houver candidatos sem sobreposição). */
+  minClips?: number;
 }
 
 function overlap(a: ClipCandidate, b: ClipCandidate): number {
@@ -34,12 +36,26 @@ export function selectClips<T extends ClipCandidate>(candidates: T[], opts: Sele
   const cap = auto ? Math.max(1, Math.min(20, Math.floor(opts.videoDuration / Math.max(15, opts.targetDuration) / 1.5) || 1)) : Math.max(1, opts.maxClips as number);
   const minScore = auto ? opts.minScore ?? 55 : 0;
 
+  // Compilações (ex.: Top 5 da live) reaproveitam os melhores momentos de propósito:
+  // não competem por sobreposição com os cortes normais nem os eliminam
+  const isCompilation = (c: ClipCandidate) => c.category === 'top5';
+  const conflicts = (picked: T[], c: T) => !isCompilation(c) && picked.some((p) => !isCompilation(p) && overlap(p, c) > maxOverlap);
+  const want = Math.max(cap, auto ? Math.min(opts.minClips ?? 0, 20) : 0);
+
   const picked: T[] = [];
   for (const c of sorted) {
     if (picked.length >= cap) break;
-    if (picked.some((p) => overlap(p, c) > maxOverlap)) continue;
+    if (conflicts(picked, c)) continue;
     if (c.score < minScore && picked.length > 0) continue;
     picked.push(c);
+  }
+  // Poucos cortes acima da nota mínima: completa com os melhores restantes até o mínimo pedido
+  if (auto && picked.length < want) {
+    for (const c of sorted) {
+      if (picked.length >= want) break;
+      if (picked.includes(c) || conflicts(picked, c)) continue;
+      picked.push(c);
+    }
   }
   return picked.sort((a, b) => a.start - b.start);
 }

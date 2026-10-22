@@ -4,6 +4,8 @@ import { buildSentences, snapToSentences, type Sentence } from './sentences';
 export interface ClipSegment {
   start: number;
   end: number;
+  /** Título curto do momento (cartões numerados do Top 5). */
+  label?: string | null;
 }
 
 export interface ClipCandidate {

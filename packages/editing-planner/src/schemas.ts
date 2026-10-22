@@ -15,7 +15,12 @@ const Seconds = z.coerce.number().finite().min(0).max(24 * 3600);
 // ---------- Etapa 4: seleção de cortes ----------
 
 export const SegmentSchema = z
-  .object({ start: Seconds, end: Seconds })
+  .object({
+    start: Seconds,
+    end: Seconds,
+    /** Título curto do momento (usado nos cartões numerados do Top 5). */
+    label: z.string().trim().max(60).nullish(),
+  })
   .refine((s) => s.end > s.start + 1, { message: 'cada trecho precisa ter end > start (mín. 1s)' });
 
 /**
@@ -154,11 +159,12 @@ export const VideoKnowledgeSchema = z.object({
         end: Seconds,
         type: z.string().trim().max(30).default('other'),
         description: z.string().trim().max(500),
-        quote: z.string().trim().max(400).optional(),
-        speaker: z.string().trim().max(20).optional(),
-        topic: z.string().trim().max(80).optional(),
+        // A IA às vezes manda null nos campos opcionais: aceitar evita uma chamada extra de correção
+        quote: z.string().trim().max(400).nullish(),
+        speaker: z.string().trim().max(20).nullish(),
+        topic: z.string().trim().max(80).nullish(),
         strength: z.coerce.number().finite().min(0).max(100).default(50),
-        visual: z.string().trim().max(300).optional(),
+        visual: z.string().trim().max(300).nullish(),
       }),
     )
     .max(200),
@@ -222,3 +228,14 @@ export function parseWith<T>(schema: z.ZodType<T>, raw: unknown): { ok: true; da
       .join('; '),
   };
 }
+
+// ---------- Ajuste de um corte pronto (comentário do editor) ----------
+
+/** Resposta da IA ao pedido de ajuste: o plano completo revisado e, se pedido, novos trechos. */
+export const RevisionSchema = ClipEditSchema.omit({ clipIndex: true }).extend({
+  /** Só quando o pedido muda o começo/fim/trechos do corte (tempos ABSOLUTOS do vídeo original). */
+  segments: z.array(SegmentSchema).min(1).max(8).nullish(),
+  /** O que foi mudado, em uma frase (vai para o log). */
+  changes: z.string().trim().max(400).optional(),
+});
+export type Revision = z.infer<typeof RevisionSchema>;

@@ -68,6 +68,8 @@ export interface RenderSpec {
    * quadro: tudo (fundo, enquadramentos) passa a usar só essa faixa — sem borrões nem artefatos.
    */
   cleanArea?: { y0: number; y1: number } | null;
+  /** Instantes das emendas entre trechos: um flash rápido marca a transição. */
+  flashAt?: number[];
   /**
    * Layout de live (só em formatos verticais): facecam em cima, jogo embaixo. cam = caixa da facecam
    * no quadro original (frações: x0, y0, x1, y1). game = centro horizontal do jogo (0-1).
@@ -322,6 +324,13 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
     f.push(`[${label}][fc${i}]overlay=x=0:y=0:enable='${windowsExpr(b.list)}'[fo${i}]`);
     label = `fo${i}`;
   });
+
+  // Flash branco curto nas emendas de trechos (transição típica de clipe)
+  const flashes = (spec.flashAt ?? []).filter((t) => t > 0.2 && t < duration - 0.2);
+  if (flashes.length) {
+    f.push(`[${label}]drawbox=x=0:y=0:w=iw:h=ih:color=white@0.55:t=fill:enable='${flashes.map((t) => `between(t,${num(t - 0.04)},${num(t + 0.1)})`).join('+')}'[flash]`);
+    label = 'flash';
+  }
 
   // Com enquadramento por pessoa ativo, punch-ins fortes cortariam cabeças: ficam sutis e altos
   const personFraming = focusBranches.length > 0 || !!split;

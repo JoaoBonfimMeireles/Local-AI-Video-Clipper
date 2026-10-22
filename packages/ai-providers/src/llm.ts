@@ -182,6 +182,10 @@ class GeminiProvider implements LLMProvider {
           }
           if (e.status === 404) throw new Error(`Modelo "${this.model}" não encontrado ou desativado. Use "Listar modelos" nas Configurações.`);
           if (e.status === 403 || e.status === 401) throw new Error(`Chave do Gemini recusada (${e.status}). Verifique a GEMINI_API_KEY.`);
+        } else if (attempt < maxAttempts && (e instanceof TypeError || /fetch failed|ECONNRESET|ETIMEDOUT|socket|network|timeout/i.test(String((e as Error)?.message)))) {
+          // Queda de rede / timeout: tenta de novo em vez de cair direto no plano heurístico
+          await sleep(Math.min(30_000, 3000 * 2 ** (attempt - 1)), req.signal);
+          continue;
         }
         throw e;
       }
