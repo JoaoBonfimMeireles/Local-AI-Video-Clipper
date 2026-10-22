@@ -1,0 +1,11 @@
+node_modules/
+.next/
+.venv/
+*.tsbuildinfo
+.env.local
+.env
+
+# Dados locais (vídeos, resultados, banco)
+data/**
+!data/**/
+!data/**/.gitkeep

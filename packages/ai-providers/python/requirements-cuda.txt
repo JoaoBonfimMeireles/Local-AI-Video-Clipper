@@ -1,0 +1,3 @@
+# Bibliotecas CUDA 12 exigidas pelo CTranslate2 (faster-whisper) na GPU NVIDIA.
+nvidia-cublas-cu12
+nvidia-cudnn-cu12>=9,<10

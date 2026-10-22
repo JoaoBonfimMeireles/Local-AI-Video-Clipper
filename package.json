@@ -1,0 +1,49 @@
+{
+  "name": "local-ai-video-clipper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "App local para gerar cortes virais de vídeos longos com IA, legendas dinâmicas, memes e efeitos sonoros.",
+  "scripts": {
+    "dev": "concurrently -k -n web,worker -c cyan,magenta \"node scripts/run-next.js dev apps/web --webpack -p 3000\" \"tsx watch --clear-screen=false apps/web/worker/index.ts\"",
+    "dev:web": "node scripts/run-next.js dev apps/web --webpack -p 3000",
+    "worker": "tsx apps/web/worker/index.ts",
+    "build": "node scripts/run-next.js build apps/web --webpack",
+    "start": "concurrently -k -n web,worker -c cyan,magenta \"node scripts/run-next.js start apps/web -p 3000\" \"tsx apps/web/worker/index.ts\"",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p apps/web",
+    "check-env": "node scripts/check-env.js",
+    "setup:python": "node scripts/setup-python.js",
+    "setup:cuda": "node scripts/setup-python.js --cuda",
+    "setup:samples": "tsx scripts/create-sample-assets.ts",
+    "test:e2e": "tsx scripts/e2e-test.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.546.0",
+    "next": "^16.4.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tailwind-merge": "^3.3.1",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "concurrently": "^9.2.1",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "esbuild@0.28.2": true
+  }
+}

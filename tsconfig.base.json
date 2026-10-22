@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"],
+    // Os pacotes internos são resolvidos por alias (sem symlinks: o disco pode ser exFAT).
+    "paths": {
+      "@clipper/shared": ["./packages/shared/src/index.ts"],
+      "@clipper/shared/server": ["./packages/shared/src/server.ts"],
+      "@clipper/ai-providers": ["./packages/ai-providers/src/index.ts"],
+      "@clipper/video-processing": ["./packages/video-processing/src/index.ts"],
+      "@clipper/clip-selection": ["./packages/clip-selection/src/index.ts"],
+      "@clipper/editing-planner": ["./packages/editing-planner/src/index.ts"]
+    }
+  }
+}
