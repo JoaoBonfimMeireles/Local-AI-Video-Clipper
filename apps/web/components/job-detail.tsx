@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { ArrowLeft, Ban, CheckCircle2, Circle, Download, FileJson, FileText, FolderOpen, Loader2, RotateCcw, XCircle } from 'lucide-react';
+import { ArrowLeft, Ban, Check, CheckCircle2, Circle, CircleDot, Clapperboard, Copy, Download, FileJson, FileText, FolderOpen, RotateCcw, XCircle } from 'lucide-react';
 import { formatTimestamp, PIPELINE_STEPS, type Clip, type Job, type JobLog } from '@clipper/shared';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -119,7 +119,7 @@ export function JobDetail({ id }: { id: string }) {
                     {failedHere ? (
                       <XCircle className="size-4 text-destructive" />
                     ) : running ? (
-                      <Loader2 className="size-4 animate-spin text-primary" />
+                      <CircleDot className="size-4 text-primary" />
                     ) : done ? (
                       <CheckCircle2 className="size-4 text-success" />
                     ) : (
@@ -133,6 +133,12 @@ export function JobDetail({ id }: { id: string }) {
             {job.error && <p className="rounded-md bg-destructive/10 p-2 text-xs whitespace-pre-wrap text-destructive">{job.error}</p>}
             <div className="space-y-1 text-xs text-muted-foreground">
               {job.result?.provider && <p>IA: {job.result.provider}</p>}
+              {job.result?.aiUsage && job.result.aiUsage.calls > 0 && (
+                <p>
+                  Uso: {job.result.aiUsage.calls} chamada(s), {(job.result.aiUsage.inputTokens + job.result.aiUsage.outputTokens).toLocaleString('pt-BR')} tokens —{' '}
+                  {job.result.aiUsage.free ? 'gratuito' : `≈ US$ ${job.result.aiUsage.costUsd.toFixed(4)}`}
+                </p>
+              )}
               {job.result?.language && <p>Idioma detectado: {job.result.language}</p>}
               {job.result?.outputDir && (
                 <p className="flex items-start gap-1 break-all">
@@ -161,6 +167,8 @@ export function JobDetail({ id }: { id: string }) {
         </Card>
       </div>
 
+      {job.result?.outputDir && job.status === 'completed' && <VideoInfo outputDir={job.result.outputDir} />}
+
       <div className="space-y-3">
         <h2 className="text-lg font-semibold">Cortes {clips.length > 0 && <span className="text-muted-foreground">({clips.filter((c) => c.status === 'completed').length}/{clips.length})</span>}</h2>
         {!clips.length && <p className="text-sm text-muted-foreground">Os cortes aparecem aqui após a etapa de seleção.</p>}
@@ -170,6 +178,93 @@ export function JobDetail({ id }: { id: string }) {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+interface Knowledge {
+  summary: string;
+  format: string;
+  speakers: { id: string; description: string; position: string }[];
+  topics: string[];
+}
+
+/** Resumo da IA sobre o vídeo (do cache de conhecimento) + texto em português do que é falado. */
+function VideoInfo({ outputDir }: { outputDir: string }) {
+  const [knowledge, setKnowledge] = useState<Knowledge | null>(null);
+  const [ptText, setPtText] = useState<string | null>(null);
+  useEffect(() => {
+    const sep = outputDir.includes('\\') ? '\\' : '/';
+    fetch(fileUrl(`${outputDir}${sep}video_knowledge.json`))
+      .then((r) => (r.ok ? r.json() : null))
+      .then(setKnowledge)
+      .catch(() => undefined);
+    fetch(fileUrl(`${outputDir}${sep}transcricao_pt.txt`))
+      .then((r) => (r.ok ? r.text() : null))
+      .then(setPtText)
+      .catch(() => undefined);
+  }, [outputDir]);
+  if (!knowledge && !ptText) return null;
+  const sep = outputDir.includes('\\') ? '\\' : '/';
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Sobre o vídeo</CardTitle>
+        {knowledge && <CardDescription>{knowledge.format}</CardDescription>}
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {knowledge && (
+          <>
+            <p className="text-sm">{knowledge.summary}</p>
+            {knowledge.speakers.length > 0 && (
+              <ul className="space-y-0.5 text-xs text-muted-foreground">
+                {knowledge.speakers.map((p) => (
+                  <li key={p.id}>
+                    <span className="font-medium text-foreground">{p.id}</span>: {p.description}
+                    {p.position ? ` — ${p.position}` : ''}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {knowledge.topics.length > 0 && <p className="text-xs text-primary">{knowledge.topics.join(' · ')}</p>}
+          </>
+        )}
+        {ptText && (
+          <details className="rounded-md border">
+            <summary className="cursor-pointer px-3 py-2 text-sm font-medium">Texto em português do que é falado</summary>
+            <pre className="max-h-96 overflow-auto border-t px-3 py-2 font-sans text-xs leading-relaxed whitespace-pre-wrap">{ptText}</pre>
+            <div className="border-t px-3 py-2">
+              <a className={buttonVariants({ size: 'sm', variant: 'outline' })} href={fileUrl(`${outputDir}${sep}transcricao_pt.txt`, true)}>
+                <Download /> Baixar .txt
+              </a>
+            </div>
+          </details>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Legenda sugerida para o post + hashtags, com botão para copiar tudo. */
+function PostText({ clip }: { clip: Clip }) {
+  const [copied, setCopied] = useState(false);
+  const text = [clip.title, clip.description, clip.hashtags.join(' ')].filter(Boolean).join('\n\n');
+  return (
+    <div className="space-y-1.5 rounded-md border bg-muted/30 p-2">
+      {clip.description && <p className="text-xs whitespace-pre-wrap">{clip.description}</p>}
+      {clip.hashtags.length > 0 && <p className="text-xs text-primary">{clip.hashtags.join(' ')}</p>}
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-7 px-2"
+        onClick={async () => {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        }}
+      >
+        {copied ? <Check /> : <Copy />} {copied ? 'Copiado' : 'Copiar texto do post'}
+      </Button>
     </div>
   );
 }
@@ -184,7 +279,7 @@ function ClipCard({ clip }: { clip: Clip }) {
         ) : clip.status === 'failed' ? (
           <XCircle className="size-8 text-destructive" />
         ) : (
-          <Loader2 className={cn('size-8 text-muted-foreground', clip.status === 'rendering' && 'animate-spin text-primary')} />
+          <Clapperboard className={cn('size-8 text-muted-foreground', clip.status === 'rendering' && 'text-primary')} />
         )}
       </div>
       <CardContent className="space-y-2 pt-4">
@@ -197,6 +292,7 @@ function ClipCard({ clip }: { clip: Clip }) {
           {formatTimestamp(clip.start)} → {formatTimestamp(clip.end)} · {(clip.end - clip.start).toFixed(0)}s
         </p>
         {clip.reason && <p className="line-clamp-3 text-xs text-muted-foreground">{clip.reason}</p>}
+        {(clip.description || clip.hashtags.length > 0) && <PostText clip={clip} />}
         {clip.error && <p className="line-clamp-4 text-xs whitespace-pre-wrap text-destructive">{clip.error}</p>}
         {clip.status === 'completed' && clip.outputPath && (
           <div className="flex flex-wrap gap-1.5 pt-1">

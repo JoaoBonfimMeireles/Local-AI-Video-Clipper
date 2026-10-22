@@ -105,6 +105,7 @@ export function getDb(): DB {
   db.pragma('busy_timeout = 5000');
   db.pragma('foreign_keys = ON');
   db.exec(SCHEMA);
+  migrate(db);
   seedPresets(db);
   globalForDb.__clipperDb = db;
   return db;
@@ -114,9 +115,17 @@ function now(): string {
   return new Date().toISOString();
 }
 
+/** Migrações aditivas para bancos criados por versões anteriores. */
+function migrate(db: DB) {
+  const clipCols = new Set((db.prepare('PRAGMA table_info(clips)').all() as { name: string }[]).map((c) => c.name));
+  if (!clipCols.has('description')) db.exec('ALTER TABLE clips ADD COLUMN description TEXT');
+  if (!clipCols.has('hashtags_json')) db.exec('ALTER TABLE clips ADD COLUMN hashtags_json TEXT');
+}
+
 function seedPresets(db: DB) {
   const insert = db.prepare(
-    'INSERT OR IGNORE INTO presets (id, name, settings_json, builtin, created_at) VALUES (?, ?, ?, 1, ?)',
+    `INSERT INTO presets (id, name, settings_json, builtin, created_at) VALUES (?, ?, ?, 1, ?)
+     ON CONFLICT(name) DO UPDATE SET settings_json = excluded.settings_json WHERE presets.builtin = 1`,
   );
   for (const p of BUILTIN_PRESETS) {
     insert.run(randomUUID(), p.name, JSON.stringify({ ...DEFAULT_JOB_SETTINGS, ...p.settings }), now());
@@ -288,6 +297,8 @@ interface ClipRow {
   srt_path: string | null;
   metadata_path: string | null;
   error: string | null;
+  description: string | null;
+  hashtags_json: string | null;
 }
 
 function toClip(r: ClipRow): Clip {
@@ -305,6 +316,8 @@ function toClip(r: ClipRow): Clip {
     srtPath: r.srt_path,
     metadataPath: r.metadata_path,
     error: r.error,
+    description: r.description,
+    hashtags: r.hashtags_json ? JSON.parse(r.hashtags_json) : [],
   };
 }
 
@@ -325,7 +338,7 @@ export function replaceClips(
 export function updateClip(
   jobId: string,
   index: number,
-  patch: Partial<Pick<Clip, 'status' | 'outputPath' | 'srtPath' | 'metadataPath' | 'error'>>,
+  patch: Partial<Pick<Clip, 'status' | 'outputPath' | 'srtPath' | 'metadataPath' | 'error' | 'title' | 'description' | 'hashtags'>>,
 ): void {
   const cols: string[] = [];
   const vals: unknown[] = [];
@@ -335,10 +348,13 @@ export function updateClip(
     srtPath: 'srt_path',
     metadataPath: 'metadata_path',
     error: 'error',
+    title: 'title',
+    description: 'description',
+    hashtags: 'hashtags_json',
   };
   for (const [k, v] of Object.entries(patch)) {
     cols.push(`${map[k]} = ?`);
-    vals.push(v ?? null);
+    vals.push(k === 'hashtags' ? JSON.stringify(v ?? []) : (v ?? null));
   }
   if (!cols.length) return;
   getDb()

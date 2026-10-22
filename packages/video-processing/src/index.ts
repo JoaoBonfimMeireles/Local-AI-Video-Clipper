@@ -4,3 +4,4 @@ export * from './audio';
 export * from './frames';
 export * from './subtitles';
 export * from './render';
+export * from './prepare';

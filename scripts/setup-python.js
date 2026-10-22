@@ -37,4 +37,13 @@ if (withCuda) {
   const reqCuda = path.join(root, 'packages', 'ai-providers', 'python', 'requirements-cuda.txt');
   if (fs.existsSync(reqCuda)) sh(py, ['-m', 'pip', 'install', '-r', reqCuda]);
 }
+// Modelo de detecção de rostos (YuNet, OpenCV Zoo, licença MIT) usado no enquadramento automático
+const faceModel = path.join(root, 'packages', 'ai-providers', 'python', 'models', 'face_detection_yunet_2023mar.onnx');
+if (!fs.existsSync(faceModel)) {
+  console.log('> baixando modelo de rostos YuNet (opencv_zoo)');
+  fs.mkdirSync(path.dirname(faceModel), { recursive: true });
+  const res = await fetch('https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx');
+  if (!res.ok) throw new Error(`Falha ao baixar o modelo YuNet: HTTP ${res.status}`);
+  fs.writeFileSync(faceModel, Buffer.from(await res.arrayBuffer()));
+}
 console.log('\nPython pronto. Rode "npm run check-env" para conferir.');

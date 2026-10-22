@@ -11,7 +11,13 @@ import {
   PLAN_SYSTEM,
   SELECTION_SYSTEM,
   TranslationSchema,
+  withGuidelines,
+  ANALYSIS_SYSTEM,
+  buildAnalysisPrompt,
+  buildSelectionFromKnowledgePrompt,
+  VideoKnowledgeSchema,
   type ClipEdit,
+  type VideoKnowledge,
 } from '@clipper/editing-planner';
 import type { ClipCandidate } from '@clipper/clip-selection';
 import type { z } from 'zod';
@@ -96,7 +102,7 @@ export async function aiSelectCandidates(args: {
     const result = await askJson(
       llm,
       {
-        system: SELECTION_SYSTEM,
+        system: withGuidelines(SELECTION_SYSTEM, args.app.editingPrompt),
         prompt: buildSelectionPrompt({
           transcriptText: chunk.text,
           settings,
@@ -121,25 +127,53 @@ export async function aiSelectCandidates(args: {
 
 export async function aiPlanEdits(args: {
   llm: LLMProvider;
-  clips: { index: number; duration: number; title: string; words: TranscriptWord[] }[];
+  clips: { index: number; duration: number; title: string; words: TranscriptWord[]; frames?: { time: number; path: string; note?: string }[]; cuts?: number[] }[];
   settings: JobSettings;
   library: LibraryIndex;
+  language: string;
+  guidelines?: string;
+  knowledge?: VideoKnowledge | null;
+  sendImages?: boolean;
   log: Log;
   signal?: AbortSignal;
 }): Promise<Map<number, ClipEdit>> {
   const out = new Map<number, ClipEdit>();
+  // Com imagens, lotes menores mantêm cada chamada leve (o plano gratuito limita tokens por minuto)
+  const withImages = !!args.sendImages && args.llm.supportsImages && args.clips.some((c) => c.frames?.length);
+  // Um corte por imagem ~250 tokens: 4 cortes x 16 imagens cabem com folga numa chamada (economiza cota)
   const BATCH = 4;
   for (let b = 0; b < args.clips.length; b += BATCH) {
     const batch = args.clips.slice(b, b + BATCH);
+    const images: ReturnType<typeof imageFromFile>[] = [];
+    const visualByClip = new Map<number, string>();
+    for (const c of batch) {
+      const lines: string[] = [];
+      if (c.cuts?.length) lines.push(`Cortes de câmera no vídeo original (o conteúdo muda de lugar): t=${c.cuts.map((t) => t.toFixed(1)).join(', ')}s`);
+      if (!c.frames?.length) {
+        if (lines.length) visualByClip.set(c.index, lines.join('\n'));
+        continue;
+      }
+      for (const fr of c.frames) {
+        if (withImages) {
+          images.push(imageFromFile(fr.path));
+          lines.push(`imagem ${images.length}: t=${fr.time.toFixed(1)}s${fr.note ? ` — ${fr.note}` : ''}`);
+        }
+      }
+      if (lines.length) visualByClip.set(c.index, lines.join('\n'));
+    }
     const plan = await askJson(
       args.llm,
       {
-        system: PLAN_SYSTEM,
+        system: withGuidelines(PLAN_SYSTEM, args.guidelines),
         prompt: buildPlanPrompt({
           clips: batch.map((c) => ({ index: c.index, duration: c.duration, title: c.title, transcript: wordsToTimedText(c.words) })),
           settings: args.settings,
           library: args.library,
+          language: args.language,
+          knowledge: args.knowledge,
+          visualByClip,
         }),
+        images: images.length ? images : undefined,
         signal: args.signal,
       },
       EditPlanSchema,
@@ -148,6 +182,90 @@ export async function aiPlanEdits(args: {
     for (const e of plan.clips) if (batch.some((c) => c.index === e.clipIndex)) out.set(e.clipIndex, e);
   }
   return out;
+}
+
+/**
+ * Análise reutilizável do vídeo (resumo, pessoas, momentos). É feita uma vez por vídeo e guardada
+ * em cache: reprocessar o mesmo vídeo com outra edição não reenvia transcrição nem frames.
+ */
+export async function aiAnalyzeVideo(args: {
+  llm: LLMProvider;
+  transcript: Transcript;
+  videoDuration: number;
+  frames?: FrameRef[];
+  sendImages: boolean;
+  log: Log;
+  signal?: AbortSignal;
+}): Promise<VideoKnowledge> {
+  const chunks = chunkTranscript(args.transcript, args.llm.maxPromptChars);
+  const parts: VideoKnowledge[] = [];
+  for (let c = 0; c < chunks.length; c++) {
+    const chunk = chunks[c];
+    const frames = (args.frames ?? []).filter((f) => f.time >= chunk.from && f.time <= chunk.to);
+    const useImages = args.sendImages && args.llm.supportsImages;
+    const visualNotes = frames.length ? frames.map((f, i) => `imagem ${i + 1}: t=${f.time.toFixed(1)}s (${f.reason})`).join('\n') : undefined;
+    parts.push(
+      await askJson(
+        args.llm,
+        {
+          system: ANALYSIS_SYSTEM,
+          prompt: buildAnalysisPrompt({
+            transcriptText: chunk.text,
+            videoDuration: args.videoDuration,
+            visualNotes: useImages ? visualNotes : undefined,
+            chunkInfo: chunks.length > 1 ? `Este é o bloco ${c + 1}/${chunks.length} (de ${chunk.from.toFixed(0)}s a ${chunk.to.toFixed(0)}s).` : '',
+          }),
+          images: useImages ? frames.slice(0, 16).map((f) => imageFromFile(f.path)) : undefined,
+          maxTokens: 32768,
+          signal: args.signal,
+        },
+        VideoKnowledgeSchema,
+        args.log,
+      ),
+    );
+  }
+  if (parts.length === 1) return parts[0];
+  // Junta os blocos: resumo do primeiro + momentos de todos (sem duplicar sobreposições)
+  const moments = parts.flatMap((p) => p.moments).sort((a, b) => a.start - b.start);
+  const dedup = moments.filter((m, i) => i === 0 || m.start >= moments[i - 1].end - 1);
+  return {
+    summary: parts.map((p) => p.summary).join(' '),
+    format: parts[0].format,
+    speakers: parts[0].speakers,
+    topics: [...new Set(parts.flatMap((p) => p.topics))].slice(0, 30),
+    moments: dedup.slice(0, 200),
+  };
+}
+
+/** Seleção de cortes usando só a análise em cache (bem menos tokens que transcrição + frames). */
+export async function aiSelectFromKnowledge(args: {
+  llm: LLMProvider;
+  knowledge: VideoKnowledge;
+  settings: JobSettings;
+  app: AppSettings;
+  videoDuration: number;
+  log: Log;
+  signal?: AbortSignal;
+}): Promise<ClipCandidate[]> {
+  const res = await askJson(
+    args.llm,
+    {
+      system: withGuidelines(SELECTION_SYSTEM, args.app.editingPrompt),
+      prompt: buildSelectionFromKnowledgePrompt({ knowledge: args.knowledge, settings: args.settings, videoDuration: args.videoDuration }),
+      signal: args.signal,
+    },
+    CandidateListSchema,
+    args.log,
+  );
+  return res.clips.map((x) => ({
+    start: x.start,
+    end: Math.min(x.end, args.videoDuration),
+    segments: x.segments.map((sg) => ({ start: sg.start, end: Math.min(sg.end, args.videoDuration) })).filter((sg) => sg.end > sg.start + 1),
+    score: x.score,
+    title: x.title,
+    reason: x.reason,
+    hook: x.hook,
+  }));
 }
 
 /** Texto com tempos relativos agrupado em frases de ~8 palavras: "[3.2] palavras ...". */
@@ -165,16 +283,17 @@ export async function translateSegments(args: {
   segments: { id: number; text: string }[];
   targetLang: string;
   sourceLang: string;
+  guidelines?: string;
   log: Log;
   signal?: AbortSignal;
 }): Promise<Map<number, string>> {
   const out = new Map<number, string>();
-  const BATCH = 40;
+  const BATCH = 220;
   for (let i = 0; i < args.segments.length; i += BATCH) {
     const items = args.segments.slice(i, i + BATCH);
     const res = await askJson(
       args.llm,
-      { system: 'Você é um tradutor profissional de legendas. Responda SOMENTE com JSON.', prompt: buildTranslationPrompt(items, args.targetLang, args.sourceLang), temperature: 0.2, signal: args.signal },
+      { system: withGuidelines('Você é um tradutor profissional de legendas. Responda SOMENTE com JSON.', args.guidelines), prompt: buildTranslationPrompt(items, args.targetLang, args.sourceLang), temperature: 0.2, signal: args.signal },
       TranslationSchema,
       args.log,
     );

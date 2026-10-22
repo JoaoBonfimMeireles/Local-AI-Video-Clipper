@@ -11,6 +11,7 @@ const TYPES: Record<string, string> = {
   '.png': 'image/png',
   '.srt': 'application/x-subrip; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
 };
 
 /** Serve arquivos de data/output (somente) com suporte a Range para o player de vídeo. */

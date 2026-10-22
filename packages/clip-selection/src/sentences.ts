@@ -71,6 +71,17 @@ export function snapToSentences(start: number, end: number, sentences: Sentence[
 
 const round3 = (n: number) => Math.round(n * 1000) / 1000;
 
+/** Palavras de um corte com vários trechos, com tempos na linha do tempo do corte (trechos emendados). */
+export function wordsForSegments(transcript: Transcript, segments: { start: number; end: number }[]): TranscriptWord[] {
+  const out: TranscriptWord[] = [];
+  let offset = 0;
+  for (const seg of segments) {
+    for (const w of wordsInRange(transcript, seg.start, seg.end)) out.push({ ...w, start: w.start + offset, end: w.end + offset });
+    offset += seg.end - seg.start;
+  }
+  return out;
+}
+
 /** Palavras do intervalo, com tempos relativos ao início do corte. */
 export function wordsInRange(transcript: Transcript, start: number, end: number): TranscriptWord[] {
   return flattenWords(transcript.segments)

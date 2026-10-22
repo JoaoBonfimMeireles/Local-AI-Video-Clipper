@@ -1,9 +1,16 @@
 import type { Transcript } from '@clipper/shared';
 import { buildSentences, snapToSentences, type Sentence } from './sentences';
 
+export interface ClipSegment {
+  start: number;
+  end: number;
+}
+
 export interface ClipCandidate {
   start: number;
   end: number;
+  /** Trechos que compõem o corte, na ordem de exibição. Ausente = [start, end] contínuo. */
+  segments?: ClipSegment[];
   score: number;
   title: string;
   reason: string;

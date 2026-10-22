@@ -83,3 +83,15 @@ export const LANGUAGES: { code: string; label: string }[] = [
 export function languageLabel(code: string): string {
   return LANGUAGES.find((l) => l.code === code)?.label ?? code;
 }
+
+/** Linha de créditos para a descrição do post (vídeos Creative Commons exigem atribuição). */
+export function creditLine(s: { creditTitle?: string; creditChannel?: string; creditUrl?: string }): string {
+  const title = s.creditTitle?.trim();
+  const channel = s.creditChannel?.trim();
+  const url = s.creditUrl?.trim();
+  if (!title && !channel && !url) return '';
+  const who = [title ? `"${title}"` : '', channel ? `de ${channel}` : ''].filter(Boolean).join(' ');
+  return `🎬 Créditos: vídeo original ${who}${url ? ` — ${url}` : ''} (licença Creative Commons). Todos os direitos ao autor original.`
+    .replace(/\s+/g, ' ')
+    .trim();
+}

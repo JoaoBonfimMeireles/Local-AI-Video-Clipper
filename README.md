@@ -3,7 +3,7 @@
 App **100% local** que recebe vídeos longos (30min+), transcreve com `faster-whisper`, escolhe os trechos com maior potencial viral e renderiza cortes prontos com **legendas dinâmicas (estilo Hormozi)**, **zooms punch-in**, **memes** e **efeitos sonoros** da sua biblioteca local.
 
 - Dashboard: <http://localhost:3000>
-- Sem SaaS obrigatório: a seleção funciona em modo **heurístico local**; Gemini, Anthropic ou **Ollama** (local) são opcionais.
+- IA padrão: **Gemini 3 Flash** (tem plano gratuito). Sem chave, o app usa a seleção **heurística local**. Anthropic e Ollama também são suportados.
 
 ## Início rápido
 
@@ -74,10 +74,52 @@ Em **Configurações** (ou `.env.local` na raiz, veja `.env.example`):
 
 | Provedor | Uso |
 | --- | --- |
-| Heurístico | Padrão, offline. Seleção e plano por regras. Não traduz. |
-| Gemini | `GEMINI_API_KEY`, modelo padrão `gemini-2.5-flash`. Multimodal. |
+| Gemini (padrão) | `GEMINI_API_KEY`. Planos abaixo. Multimodal (transcrição + frames). |
+| Heurístico | Offline, sem chave. Seleção e plano por regras. Não traduz nem gera hashtags. |
 | Anthropic | `ANTHROPIC_API_KEY`, modelo padrão `claude-sonnet-5-5`. Multimodal. |
 | Ollama | `http://127.0.0.1:11434`, modelo padrão `llama3`. Transcrições longas são divididas em blocos. |
+
+### Planos do Gemini
+
+| Plano | Cortes | Edição, memes, sons, títulos, hashtags, tradução | Custo estimado* |
+| --- | --- | --- | --- |
+| Gratuito | `gemini-3-flash-preview` | `gemini-3-flash-preview` | US$ 0 (limites por minuto/dia; o Google pode usar os dados) |
+| Pago | `gemini-3-flash-preview` | `gemini-3-flash-preview` | ~US$ 10–25/mês |
+| Combinado | `gemini-3.1-pro-preview` (raciocínio alto) | `gemini-3-flash-preview` (raciocínio baixo) | ~US$ 30–60/mês |
+
+\* ~3 vídeos/dia. Os modelos são editáveis e o botão "Listar modelos" mostra os disponíveis para a sua chave.
+Cada job registra tokens usados e custo estimado. No plano gratuito o app espaça as chamadas (~8/min) e respeita o `retryDelay` dos erros 429.
+
+### Cota gratuita
+
+O plano gratuito do `gemini-3-flash-preview` permite **20 requisições por dia**. Quando acaba, o app usa
+automaticamente o **modelo reserva** (padrão `gemini-3.1-flash-lite`, cota própria) e avisa no log.
+Um vídeo novo usa ~4–6 chamadas; reprocessar o mesmo vídeo usa ~2 (graças ao cache abaixo).
+
+### Cache de conhecimento do vídeo
+
+Na primeira vez, a IA analisa o vídeo (resumo, pessoas e posição no quadro, momentos com nota) e isso fica
+em `data/cache/transcripts/<id>.knowledge.json`, junto da transcrição e do texto em português. Reprocessar o
+mesmo arquivo com outra edição não reenvia transcrição nem frames: a seleção usa só essa análise.
+A seleção pode **juntar trechos distantes** num mesmo corte (até 4, em qualquer ordem — ex.: a conclusão como gancho).
+
+### Enquadramento e legenda antiga
+
+- **Quem fala:** a IA decide quem/o que enquadrar a cada momento (vendo frames + transcrição); a detecção local de
+  rostos (YuNet, OpenCV) corrige a posição e os cortes de câmera do vídeo original são respeitados.
+- **Pessoa inteira:** a janela só é usada se couber a cabeça com folga e os ombros; senão reduz a aproximação ou
+  abre o plano (só a faixa onde estão as pessoas).
+- **Legenda antiga** (ligada por padrão): "Recortar fora" enquadra sem a faixa da legenda (imagem 100% real);
+  "Apagar e preencher" remove o texto e reconstrói o fundo (útil para legenda no meio da tela; pode deixar marcas).
+- **Texto em português:** `transcricao_pt.txt` em toda saída (só texto, gerado uma vez por vídeo).
+- **Créditos:** campos de título/canal/link do vídeo original (Creative Commons) no formulário; a linha de créditos
+  vai ao fim de cada descrição.
+
+### Diretrizes editoriais
+
+Em **Configurações → Diretrizes editoriais da IA** você descreve como a IA deve escolher trechos, editar,
+destacar palavras e escrever títulos/hashtags. O texto entra no prompt de sistema de todas as chamadas
+(seleção, edição e tradução), com prioridade sobre o estilo padrão; os limites técnicos continuam valendo.
 
 Se a IA falhar ou responder um JSON inválido (após uma tentativa de correção), o pipeline usa a heurística local em vez de falhar.
 

@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { FileVideo, Loader2, Play, RefreshCw, Save, Trash2, UploadCloud } from 'lucide-react';
-import { DEFAULT_JOB_SETTINGS, formatBytes, LANGUAGES, type Intensity, type JobSettings, type OutputFormat, type Preset } from '@clipper/shared';
+import { creditLine, DEFAULT_JOB_SETTINGS, formatBytes, LANGUAGES, type Intensity, type JobSettings, type OutputFormat, type Preset } from '@clipper/shared';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -80,7 +80,8 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
     setPresetId(id);
     const p = presets.find((x) => x.id === id);
     if (p) {
-      setSettings({ ...DEFAULT_JOB_SETTINGS, ...p.settings });
+      // Créditos pertencem ao vídeo, não ao estilo: o preset não os sobrescreve
+      setSettings((cur) => ({ ...DEFAULT_JOB_SETTINGS, ...p.settings, creditTitle: cur.creditTitle, creditChannel: cur.creditChannel, creditUrl: cur.creditUrl }));
       setPresetName(p.builtin ? '' : p.name);
     }
   }
@@ -312,7 +313,21 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
           <Toggle label="Exportar arquivos .srt" checked={settings.exportSrt} onChange={(v) => set('exportSrt', v)} />
           <Toggle label="Usar memes da biblioteca" checked={settings.useMemes} onChange={(v) => set('useMemes', v)} />
           <Toggle label="Usar efeitos sonoros" checked={settings.useSfx} onChange={(v) => set('useSfx', v)} />
-          <Toggle label="Remover legendas antigas (desfoque)" checked={settings.removeOldSubtitles} onChange={(v) => set('removeOldSubtitles', v)} />
+          <Toggle label="Remover legenda do vídeo original" checked={settings.removeOldSubtitles} onChange={(v) => set('removeOldSubtitles', v)} />
+        </section>
+
+        {/* Créditos (vídeos Creative Commons) */}
+        <section className="space-y-2 rounded-lg border bg-muted/30 p-3">
+          <div>
+            <Label>Créditos do vídeo original</Label>
+            <p className="mt-1 text-xs text-muted-foreground">Para vídeos do YouTube com licença Creative Commons: o crédito é adicionado ao fim da descrição de cada corte.</p>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Input placeholder="Título do vídeo original" value={settings.creditTitle} onChange={(e) => set('creditTitle', e.target.value)} maxLength={300} />
+            <Input placeholder="Canal / autor" value={settings.creditChannel} onChange={(e) => set('creditChannel', e.target.value)} maxLength={200} />
+          </div>
+          <Input placeholder="https://www.youtube.com/watch?v=..." value={settings.creditUrl} onChange={(e) => set('creditUrl', e.target.value.trim())} type="url" />
+          {creditLine(settings) && <p className="rounded-md bg-background/60 p-2 text-xs text-muted-foreground">{creditLine(settings)}</p>}
         </section>
 
         {message && <p className={cn('rounded-md px-3 py-2 text-sm', message.type === 'ok' ? 'bg-success/10 text-success' : 'bg-destructive/10 text-destructive')}>{message.text}</p>}

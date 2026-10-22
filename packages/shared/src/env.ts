@@ -27,10 +27,17 @@ function parseEnv(content: string): Record<string, string> {
   return out;
 }
 
+/** Lê .env e .env.local da raiz (valores não vazios do .env.local têm prioridade). */
 export function readEnvFile(): Record<string, string> {
-  const file = envFilePath();
-  if (!fs.existsSync(file)) return {};
-  return parseEnv(fs.readFileSync(file, 'utf8'));
+  const out: Record<string, string> = {};
+  for (const name of ['.env', '.env.local']) {
+    const file = path.join(getRepoRoot(), name);
+    if (!fs.existsSync(file)) continue;
+    for (const [k, v] of Object.entries(parseEnv(fs.readFileSync(file, 'utf8')))) {
+      if (v || !(k in out)) out[k] = v;
+    }
+  }
+  return out;
 }
 
 /** Carrega .env.local da raiz em process.env (sem sobrescrever variáveis já definidas no shell). */

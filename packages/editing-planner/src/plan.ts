@@ -1,6 +1,6 @@
 import type { Intensity, JobSettings, LibraryIndex, TranscriptWord } from '@clipper/shared';
 import { resolveLibraryFile, type LibraryKind } from '@clipper/shared/server';
-import type { ClipEdit, Overlay, Sfx, Zoom } from './schemas';
+import type { ClipEdit, Overlay, Sfx, Shot, Zoom } from './schemas';
 
 // ---------------- Limites por intensidade ----------------
 
@@ -46,11 +46,114 @@ export function normalizeEdit(edit: ClipEdit, duration: number, settings: JobSet
 
   return {
     clipIndex: edit.clipIndex,
+    shots: normalizeShots(edit.shots ?? [], duration),
     zooms: zooms.slice(0, cap(lim.zoomsPerMin, duration)),
     overlays: overlays.slice(0, cap(lim.memesPerMin, duration)).slice(0, settings.intensity === 'low' ? 0 : 30),
     sfx: sfx.slice(0, cap(lim.sfxPerMin, duration)),
     emphasisWords: edit.emphasisWords.slice(0, 60),
+    title: edit.title,
+    description: edit.description,
+    hashtags: edit.hashtags ?? [],
   };
+}
+
+/**
+ * Deixa os enquadramentos contínuos (cada um vai até o início do próximo), descarta trocas com
+ * menos de 1s (piscadas de câmera) e garante cobertura até o fim do corte.
+ */
+export function normalizeShots(shots: Shot[], duration: number): Shot[] {
+  const sorted = [...shots].filter((x) => x.at < duration - 0.5).sort((a, b) => a.at - b.at);
+  const out: Shot[] = [];
+  for (const sh of sorted) {
+    const prev = out[out.length - 1];
+    if (prev && sh.at - prev.at < 1) {
+      out[out.length - 1] = { ...sh, at: prev.at };
+      continue;
+    }
+    out.push({ ...sh, at: out.length === 0 ? 0 : sh.at });
+  }
+  return out.map((sh, i) => ({ ...sh, duration: (out[i + 1]?.at ?? duration) - sh.at }));
+}
+
+const pickBox = (f: { x: number; y: number; w: number; h: number }) => ({ x: f.x, y: f.y, w: f.w, h: f.h });
+
+export interface FrameFaces {
+  /** Tempo na linha do tempo do corte. */
+  time: number;
+  faces: { x: number; y: number; w: number; h: number }[];
+}
+
+/**
+ * Combina a decisão da IA (QUEM/O QUE enquadrar) com a detecção local de rostos (ONDE está):
+ * 1. divide shots nos cortes de câmera do vídeo original (o conteúdo muda de lugar a cada corte);
+ * 2. ajusta focusX/focusY de cada shot "focus" ao rosto mais próximo do que a IA apontou;
+ * 3. se o vídeo original já está em close (rosto grande), não aproxima mais (evita rosto cortado);
+ * 4. sem rosto perto do alvo e com aproximação forte (comida/objeto), mantém a escolha da IA.
+ */
+export function refineShots(shots: Shot[], ctx: { duration: number; cuts: number[]; frames: FrameFaces[] }): Shot[] {
+  if (!shots.length) return shots;
+  const cuts = ctx.cuts.filter((c) => c > 0.5 && c < ctx.duration - 0.5).sort((a, b) => a - b);
+  const split: Shot[] = [];
+  for (const sh of normalizeShots(shots, ctx.duration)) {
+    const end = sh.at + sh.duration;
+    let at = sh.at;
+    for (const c of cuts) {
+      if (c > at + 0.8 && c < end - 0.8) {
+        split.push({ ...sh, at, duration: c - at });
+        at = c;
+      }
+    }
+    split.push({ ...sh, at, duration: end - at });
+  }
+
+  const refined = split.map((sh) => {
+    if (sh.type === 'wide') {
+      // Plano aberto: só a faixa que contém todas as pessoas (ficam maiores no 9:16), sem cortar ninguém
+      const faces = ctx.frames.filter((f) => f.time >= sh.at && f.time < sh.at + sh.duration).slice(0, 3).flatMap((f) => f.faces);
+      if (faces.length < 2) return sh;
+      const x0 = Math.max(0, Math.min(...faces.map((f) => f.x - f.w * 1.7)));
+      const x1 = Math.min(1, Math.max(...faces.map((f) => f.x + f.w * 1.7)));
+      return x1 - x0 < 0.95 ? { ...sh, group: { x0, x1 } } : sh;
+    }
+    if (sh.type !== 'focus') return sh;
+    // Frames logo após o início do shot representam o que está na tela nele
+    const inWindow = ctx.frames.filter((f) => f.time >= sh.at && f.time < sh.at + sh.duration);
+    const sample = inWindow.slice(0, 3).flatMap((f) => f.faces);
+    if (!sample.length) return sh;
+    const isObject = sh.scale >= 1.4 && sh.focusY >= 0.6;
+    const nearest = sample.reduce((best, f) => (Math.abs(f.x - sh.focusX) < Math.abs(best.x - sh.focusX) ? f : best));
+    if (Math.abs(nearest.x - sh.focusX) > (isObject ? 0.12 : 0.3)) {
+      // A IA mirou algo que não é rosto (comida, objeto) ou um lugar vazio
+      if (isObject) return sh;
+      const biggest = sample.reduce((a, b) => (b.w > a.w ? b : a));
+      return { ...sh, focusX: biggest.x, focusY: Math.min(0.9, biggest.y + biggest.h * 0.6), scale: biggest.w > 0.2 ? 1 : sh.scale, subject: pickBox(biggest) };
+    }
+    const closeUp = nearest.w > 0.2;
+    return {
+      ...sh,
+      focusX: nearest.x,
+      // Rosto no terço superior: centraliza um pouco abaixo dele
+      focusY: Math.min(0.9, nearest.y + nearest.h * 0.6),
+      scale: closeUp ? 1 : Math.min(sh.scale, 1.6),
+      subject: pickBox(nearest),
+    };
+  });
+  return normalizeShots(refined, ctx.duration);
+}
+
+/** Enquadramento sem IA: a cada cena do vídeo original, foca no rosto principal (ou abre se há vários). */
+export function heuristicShots(ctx: { duration: number; cuts: number[]; frames: FrameFaces[]; preferWide: boolean }): Shot[] {
+  const bounds = [0, ...ctx.cuts.filter((c) => c > 0.5 && c < ctx.duration - 0.5).sort((a, b) => a - b), ctx.duration];
+  const shots: Shot[] = [];
+  for (let i = 0; i < bounds.length - 1; i++) {
+    const faces = ctx.frames.filter((f) => f.time >= bounds[i] && f.time < bounds[i + 1]).slice(0, 2).flatMap((f) => f.faces);
+    if (!faces.length) continue;
+    const distinct = new Set(faces.map((f) => Math.round(f.x * 4))).size;
+    const big = faces.reduce((a, b) => (b.w > a.w ? b : a));
+    if (distinct > 1 && ctx.preferWide) shots.push({ at: bounds[i], duration: bounds[i + 1] - bounds[i], type: 'wide', focusX: 0.5, focusY: 0.45, scale: 1 });
+    else shots.push({ at: bounds[i], duration: bounds[i + 1] - bounds[i], type: 'focus', focusX: big.x, focusY: Math.min(0.9, big.y + big.h * 0.6), scale: 1, subject: pickBox(big) });
+  }
+  return normalizeShots(shots, ctx.duration);
 }
 
 // ---------------- Plano heurístico (sem IA / fallback) ----------------
@@ -152,7 +255,7 @@ export function heuristicEdit(args: {
   }
 
   return normalizeEdit(
-    { clipIndex: args.clipIndex, zooms, overlays: overlays.sort((a, b) => a.at - b.at), sfx: sfx.sort((a, b) => a.at - b.at), emphasisWords },
+    { clipIndex: args.clipIndex, zooms, overlays: overlays.sort((a, b) => a.at - b.at), sfx: sfx.sort((a, b) => a.at - b.at), emphasisWords, hashtags: [], shots: [] },
     duration,
     settings,
   );
@@ -170,10 +273,14 @@ export interface ResolvedSfx extends Omit<Sfx, 'file'> {
 }
 export interface ResolvedEdit {
   clipIndex: number;
+  shots: Shot[];
   zooms: Zoom[];
   overlays: ResolvedOverlay[];
   sfx: ResolvedSfx[];
   emphasisWords: string[];
+  title?: string;
+  description?: string;
+  hashtags: string[];
   warnings: string[];
 }
 
@@ -212,5 +319,16 @@ export function resolveEdit(edit: ClipEdit, library: LibraryIndex, seed: string)
     const r = pick('audio', s.category, s.file);
     if (r) sfx.push({ ...s, category: r.category, file: r.file, fileName: r.fileName });
   }
-  return { clipIndex: edit.clipIndex, zooms: edit.zooms, overlays, sfx, emphasisWords: edit.emphasisWords, warnings };
+  return {
+    clipIndex: edit.clipIndex,
+    shots: edit.shots ?? [],
+    zooms: edit.zooms,
+    overlays,
+    sfx,
+    emphasisWords: edit.emphasisWords,
+    title: edit.title,
+    description: edit.description,
+    hashtags: edit.hashtags ?? [],
+    warnings,
+  };
 }

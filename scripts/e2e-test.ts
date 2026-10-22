@@ -10,6 +10,8 @@ import { runPipeline } from '../apps/web/worker/pipeline';
 
 async function main() {
   loadRootEnv();
+  // Por padrão o teste não gasta cota de IA (use CLIPPER_FORCE_PROVIDER=gemini para testar com IA)
+  process.env.CLIPPER_FORCE_PROVIDER ??= 'heuristic';
   const name = process.argv[2] ?? 'teste_podcast.mp4';
   const input = path.join(dataPaths.input, path.basename(name));
   if (!fs.existsSync(input)) {

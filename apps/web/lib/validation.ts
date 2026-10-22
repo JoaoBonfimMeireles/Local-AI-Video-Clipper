@@ -14,6 +14,9 @@ export const JobSettingsSchema = z.object({
   removeOldSubtitles: z.boolean(),
   useMemes: z.boolean(),
   useSfx: z.boolean(),
+  creditTitle: z.string().trim().max(300).default(''),
+  creditChannel: z.string().trim().max(200).default(''),
+  creditUrl: z.union([z.literal(''), z.string().trim().url().regex(/^https?:\/\//, 'link deve começar com http(s)://')]).default(''),
 });
 
 export const CreateJobSchema = z.object({
@@ -24,7 +27,14 @@ export const CreateJobSchema = z.object({
 export const AppSettingsSchema = z
   .object({
     aiProvider: z.enum(['heuristic', 'gemini', 'anthropic', 'ollama']),
-    geminiModel: z.string().regex(/^[\w.\-]{1,80}$/),
+    geminiPlan: z.enum(['free', 'paid', 'hybrid']),
+    geminiFlashModel: z.string().regex(/^[\w.\-]{1,80}$/),
+    geminiProModel: z.string().regex(/^[\w.\-]{1,80}$/),
+    geminiFallbackModel: z.union([z.literal(''), z.string().regex(/^[\w.\-]{1,80}$/)]),
+    editingPrompt: z.string().max(6000),
+    ptTranscript: z.boolean(),
+    subtitleRemoval: z.enum(['crop', 'inpaint']),
+    postLanguage: z.union([z.literal(''), z.string().regex(/^[a-z]{2,3}$/)]),
     anthropicModel: z.string().regex(/^[\w.\-]{1,80}$/),
     ollamaUrl: z.string().url().regex(/^https?:\/\//),
     ollamaModel: z.string().regex(/^[\w.\-:/]{1,80}$/),

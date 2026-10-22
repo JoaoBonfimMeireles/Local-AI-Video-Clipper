@@ -77,4 +77,30 @@ export async function detectSubtitleRegion(framePaths: string[], signal?: AbortS
   return { found: false };
 }
 
+export interface DetectedFace {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  score: number;
+}
+
+/** Rostos por imagem (YuNet local). Em caso de erro, devolve listas vazias — o enquadramento segue só com a IA. */
+export async function detectFaces(framePaths: string[], signal?: AbortSignal): Promise<DetectedFace[][]> {
+  const out: DetectedFace[][] = [];
+  for (let i = 0; i < framePaths.length; i += 80) {
+    const batch = framePaths.slice(i, i + 80);
+    try {
+      const res = await runProcess(resolvePythonBinary(), [pythonScriptPath('detect_faces.py'), ...batch], { env: { ...process.env, PYTHONIOENCODING: 'utf-8' }, signal, timeoutMs: 180_000 });
+      const parsed = JSON.parse(res.stdout.trim().split('\n').pop() || '[]');
+      if (!Array.isArray(parsed)) throw new Error(parsed.error ?? 'saída inválida');
+      out.push(...parsed.map((r: { faces?: DetectedFace[] }) => r.faces ?? []));
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      out.push(...batch.map(() => []));
+    }
+  }
+  return out;
+}
+
 const clamp01 = (n: number) => Math.max(0, Math.min(1, n));

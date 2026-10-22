@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { CheckCircle2, Cpu, KeyRound, Loader2, Plug, RefreshCw, Save, TriangleAlert, XCircle } from 'lucide-react';
-import { DEFAULT_APP_SETTINGS, type AiProviderName, type AppSettings } from '@clipper/shared';
+import { CheckCircle2, Cpu, KeyRound, Loader2, PenLine, Plug, RefreshCw, Save, TriangleAlert, XCircle } from 'lucide-react';
+import { DEFAULT_APP_SETTINGS, LANGUAGES, type AiProviderName, type AppSettings, type GeminiPlan } from '@clipper/shared';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -22,7 +22,7 @@ interface EnvCheck {
 
 const PROVIDERS: { value: AiProviderName; label: string; desc: string }[] = [
   { value: 'heuristic', label: 'Heurístico local', desc: 'Sem LLM: pontuação por gatilhos, energia do áudio e estrutura das frases.' },
-  { value: 'gemini', label: 'Google Gemini', desc: 'Multimodal (transcrição + frames). Requer GEMINI_API_KEY.' },
+  { value: 'gemini', label: 'Google Gemini', desc: 'Gemini 3 Flash / Pro, multimodal (transcrição + frames). Tem plano gratuito.' },
   { value: 'anthropic', label: 'Anthropic Claude', desc: 'Multimodal (transcrição + frames). Requer ANTHROPIC_API_KEY.' },
   { value: 'ollama', label: 'Ollama (local)', desc: 'LLM rodando na sua máquina (ex.: llama3). Sem custo, sem internet.' },
 ];
@@ -121,12 +121,14 @@ export function SettingsForm() {
             </div>
 
             {settings.aiProvider === 'gemini' && (
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="Modelo Gemini">
-                  <Input value={settings.geminiModel} onChange={(e) => set('geminiModel', e.target.value)} />
-                </Field>
-                <KeyField name="GEMINI_API_KEY" configured={secrets.GEMINI_API_KEY} value={keys.GEMINI_API_KEY} onChange={(v) => setKeys((k) => ({ ...k, GEMINI_API_KEY: v }))} onRemove={() => removeKey('GEMINI_API_KEY')} />
-              </div>
+              <GeminiSection
+                settings={settings}
+                set={set}
+                keyField={
+                  <KeyField name="GEMINI_API_KEY" configured={secrets.GEMINI_API_KEY} value={keys.GEMINI_API_KEY} onChange={(v) => setKeys((k) => ({ ...k, GEMINI_API_KEY: v }))} onRemove={() => removeKey('GEMINI_API_KEY')} />
+                }
+                keyConfigured={secrets.GEMINI_API_KEY}
+              />
             )}
             {settings.aiProvider === 'anthropic' && (
               <div className="grid gap-3 sm:grid-cols-2">
@@ -159,6 +161,54 @@ export function SettingsForm() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
+              <PenLine className="size-4 text-primary" /> Diretrizes editoriais da IA
+            </CardTitle>
+            <CardDescription>
+              Explique como a IA deve pensar: que trechos escolher, o estilo da edição, quando usar memes e sons, quais palavras destacar e o tom dos títulos e hashtags. Vale para
+              seleção, edição e tradução.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <textarea
+              value={settings.editingPrompt}
+              onChange={(e) => set('editingPrompt', e.target.value)}
+              rows={10}
+              maxLength={6000}
+              placeholder="Ex.: Meu canal é de finanças para jovens. Priorize trechos com números concretos e histórias pessoais…"
+              className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+            <div className="flex items-center justify-between gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => set('editingPrompt', EXAMPLE_PROMPT)} disabled={!!settings.editingPrompt.trim()}>
+                Inserir exemplo
+              </Button>
+              <span className="text-xs text-muted-foreground">{settings.editingPrompt.length}/6000</span>
+            </div>
+            <label className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5">
+              <span className="text-sm">
+                Gerar sempre o texto em português do que é falado
+                <span className="block text-xs text-muted-foreground">Só texto (transcricao_pt.txt), feito uma vez por vídeo e guardado em cache.</span>
+              </span>
+              <Switch checked={settings.ptTranscript} onCheckedChange={(v) => set('ptTranscript', v)} />
+            </label>
+            <Field label="Idioma dos títulos, legendas de post e hashtags">
+              <Select value={settings.postLanguage} onChange={(e) => set('postLanguage', e.target.value)}>
+                <option value="">Mesmo idioma do vídeo</option>
+                {LANGUAGES.map((l) => (
+                  <option key={l.code} value={l.code}>
+                    {l.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <p className="text-xs text-muted-foreground">
+              Sem provedor de IA (modo heurístico) este texto não é usado. Limites técnicos (quantidade de memes por intensidade, tempos válidos) continuam sendo aplicados.
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
               <Cpu className="size-4 text-primary" /> Processamento
             </CardTitle>
             <CardDescription>Transcrição (faster-whisper) e renderização (FFmpeg).</CardDescription>
@@ -182,6 +232,12 @@ export function SettingsForm() {
             </Field>
             <Field label="Threads de processamento">
               <Input type="number" min={1} max={64} value={settings.threads} onChange={(e) => set('threads', Number(e.target.value) || 4)} />
+            </Field>
+            <Field label="Legenda antiga do vídeo original" hint="Recortar fora: enquadra sem a faixa da legenda (imagem 100% real). Apagar: remove o texto e preenche (pode deixar marcas).">
+              <Select value={settings.subtitleRemoval} onChange={(e) => set('subtitleRemoval', e.target.value as AppSettings['subtitleRemoval'])}>
+                <option value="crop">Recortar fora do quadro (recomendado)</option>
+                <option value="inpaint">Apagar e preencher</option>
+              </Select>
             </Field>
             <Field label="Acelerador gráfico (encode)" hint="NVENC usa a GPU NVIDIA; volta para x264 se falhar.">
               <Select value={settings.hwAccel} onChange={(e) => set('hwAccel', e.target.value as AppSettings['hwAccel'])}>
@@ -240,6 +296,121 @@ export function SettingsForm() {
           ))}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+const EXAMPLE_PROMPT = `PÚBLICO E OBJETIVO
+- Canal de [tema] para [público]. Objetivo: reter até o fim e gerar compartilhamento.
+
+ESCOLHA DOS CORTES
+- Comece sempre por uma frase forte: pergunta, número, opinião polêmica ou promessa.
+- Prefira histórias com começo, meio e fim e trechos com conselhos práticos.
+- Evite trechos que dependem de contexto anterior ou citam "como eu falei antes".
+
+ESTILO DA EDIÇÃO
+- Zoom nas frases de impacto e nas revelações; mantenha o rosto visível.
+- Memes de reação só em momentos realmente engraçados ou surpreendentes, nunca em assuntos sérios.
+- Sons de impacto nas revelações, risadas apenas em piadas, whoosh nas mudanças de assunto.
+
+PALAVRAS EM DESTAQUE
+- Destaque números, valores em dinheiro, nomes próprios e palavras como "nunca", "segredo", "erro".
+
+TÍTULOS E HASHTAGS
+- Títulos curtos, em tom de conversa, que gerem curiosidade sem mentir (nada de clickbait falso).
+- Hashtags em português, misturando gerais (#dinheiro) e de nicho (#educacaofinanceira).`;
+
+const GEMINI_PLANS: { value: GeminiPlan; label: string; cost: string; desc: string }[] = [
+  { value: 'free', label: 'Gratuito', cost: 'US$ 0', desc: 'Só Flash, no plano gratuito do AI Studio. Ideal para testar. Tem limite de chamadas por minuto/dia.' },
+  { value: 'paid', label: 'Pago (Flash)', cost: '~US$ 10–25/mês', desc: 'Faturamento ativo, só Flash. Sem espera entre chamadas. Para postar em escala.' },
+  { value: 'hybrid', label: 'Combinado (Pro + Flash)', cost: '~US$ 30–60/mês', desc: 'Pro escolhe os cortes; Flash faz edição, memes, sons, títulos, hashtags e tradução.' },
+];
+
+function GeminiSection({
+  settings,
+  set,
+  keyField,
+  keyConfigured,
+}: {
+  settings: AppSettings;
+  set: <K extends keyof AppSettings>(k: K, v: AppSettings[K]) => void;
+  keyField: React.ReactNode;
+  keyConfigured: boolean;
+}) {
+  const [models, setModels] = useState<{ id: string; name: string }[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function loadModels() {
+    setLoading(true);
+    setError(null);
+    try {
+      setModels((await api<{ models: { id: string; name: string }[] }>('/api/settings/gemini-models')).models);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4 rounded-lg border bg-muted/20 p-3">
+      {keyField}
+      <div className="space-y-1.5">
+        <Label>Plano de uso</Label>
+        <div className="grid gap-2 sm:grid-cols-3">
+          {GEMINI_PLANS.map((p) => (
+            <button
+              key={p.value}
+              type="button"
+              onClick={() => set('geminiPlan', p.value)}
+              className={cn('rounded-lg border p-3 text-left transition-colors', settings.geminiPlan === p.value ? 'border-primary bg-primary/10' : 'hover:bg-accent/40')}
+            >
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-sm font-semibold">{p.label}</span>
+                <span className="text-[11px] text-muted-foreground">{p.cost}</span>
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">{p.desc}</div>
+            </button>
+          ))}
+        </div>
+        {settings.geminiPlan === 'free' && (
+          <p className="text-xs text-warning">
+            No plano gratuito o Google pode usar os dados enviados (transcrições e frames) para melhorar os produtos dele. O app espaça as chamadas (~8/min) e tenta de novo quando o limite é
+            atingido.
+          </p>
+        )}
+        {settings.geminiPlan !== 'free' && (
+          <p className="text-xs text-muted-foreground">Requer faturamento ativo no projeto do Google AI Studio da sua chave. Valores mensais são estimativas para ~3 vídeos por dia.</p>
+        )}
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Modelo Flash (edição, títulos, tradução)" hint={settings.geminiPlan === 'hybrid' ? undefined : 'Também escolhe os cortes nos planos Gratuito e Pago.'}>
+          <Input list="gemini-models" value={settings.geminiFlashModel} onChange={(e) => set('geminiFlashModel', e.target.value.trim())} />
+        </Field>
+        <Field label="Modelo Pro (escolha dos cortes)" hint={settings.geminiPlan === 'hybrid' ? 'Sem plano gratuito no Google.' : 'Usado só no plano Combinado.'}>
+          <Input list="gemini-models" value={settings.geminiProModel} onChange={(e) => set('geminiProModel', e.target.value.trim())} disabled={settings.geminiPlan !== 'hybrid'} />
+        </Field>
+        <Field label="Modelo reserva (cota diária esgotada)" hint="Usado automaticamente quando o limite diário do modelo principal acaba. Vazio = nenhum.">
+          <Input list="gemini-models" value={settings.geminiFallbackModel} onChange={(e) => set('geminiFallbackModel', e.target.value.trim())} placeholder="gemini-3.1-flash-lite" />
+        </Field>
+      </div>
+      <datalist id="gemini-models">
+        {models?.map((m) => (
+          <option key={m.id} value={m.id}>
+            {m.name}
+          </option>
+        ))}
+      </datalist>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" variant="outline" size="sm" onClick={loadModels} disabled={loading || !keyConfigured}>
+          {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />} Listar modelos disponíveis
+        </Button>
+        {!keyConfigured && <span className="text-xs text-muted-foreground">Salve a chave para listar.</span>}
+        {models && <span className="text-xs text-muted-foreground">{models.length} modelos — escolha nos campos acima.</span>}
+        {error && <span className="text-xs text-destructive">{error}</span>}
+      </div>
     </div>
   );
 }

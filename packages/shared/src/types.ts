@@ -26,12 +26,39 @@ export interface JobSettings {
   removeOldSubtitles: boolean;
   useMemes: boolean;
   useSfx: boolean;
+  /** Créditos do vídeo original (ex.: YouTube Creative Commons), adicionados à descrição dos posts. */
+  creditTitle: string;
+  creditChannel: string;
+  creditUrl: string;
 }
+
+/**
+ * Plano de uso do Gemini:
+ * - free:   plano gratuito do AI Studio, só Flash (com ritmo de chamadas para respeitar o limite por minuto)
+ * - paid:   faturamento ativo, só Flash (sem espera entre chamadas)
+ * - hybrid: faturamento ativo, Pro escolhe os cortes e Flash faz edição, títulos, hashtags e tradução
+ */
+export type GeminiPlan = 'free' | 'paid' | 'hybrid';
+
+/** Papel de cada chamada de IA — define qual modelo é usado no plano combinado. */
+export type LLMRole = 'select' | 'edit' | 'translate';
 
 /** Configurações globais da máquina (sem segredos). */
 export interface AppSettings {
   aiProvider: AiProviderName;
-  geminiModel: string;
+  geminiPlan: GeminiPlan;
+  geminiFlashModel: string;
+  geminiProModel: string;
+  /** Usado automaticamente quando a cota diária do modelo principal acaba ('' = nenhum). */
+  geminiFallbackModel: string;
+  /** Diretrizes editoriais livres do usuário, enviadas a todas as chamadas de IA. */
+  editingPrompt: string;
+  /** Idioma de títulos, legendas de post e hashtags ('' = mesmo idioma do vídeo). */
+  postLanguage: string;
+  /** Gera sempre um texto em português do que é falado (transcricao_pt.txt). */
+  ptTranscript: boolean;
+  /** Legenda antiga: crop = enquadrar sem a faixa (limpo); inpaint = apagar o texto e preencher. */
+  subtitleRemoval: 'crop' | 'inpaint';
   anthropicModel: string;
   ollamaUrl: string;
   ollamaModel: string;
@@ -51,14 +78,24 @@ export const DEFAULT_JOB_SETTINGS: JobSettings = {
   translateTo: '',
   burnSubtitles: true,
   exportSrt: true,
-  removeOldSubtitles: false,
+  removeOldSubtitles: true,
   useMemes: true,
   useSfx: true,
+  creditTitle: '',
+  creditChannel: '',
+  creditUrl: '',
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
-  aiProvider: 'heuristic',
-  geminiModel: 'gemini-2.5-flash',
+  aiProvider: 'gemini',
+  geminiPlan: 'free',
+  geminiFlashModel: 'gemini-3-flash-preview',
+  geminiProModel: 'gemini-3.1-pro-preview',
+  geminiFallbackModel: 'gemini-3.1-flash-lite',
+  editingPrompt: '',
+  postLanguage: 'pt',
+  ptTranscript: true,
+  subtitleRemoval: 'crop',
   anthropicModel: 'claude-sonnet-5-5',
   ollamaUrl: 'http://127.0.0.1:11434',
   ollamaModel: 'llama3',
@@ -89,6 +126,8 @@ export interface Job {
 export interface JobResult {
   outputDir?: string;
   provider?: string;
+  /** Uso de tokens e custo estimado das chamadas de IA. */
+  aiUsage?: { calls: number; inputTokens: number; outputTokens: number; costUsd: number; free: boolean };
   language?: string;
   clipsRendered?: number;
   clipsFailed?: number;
@@ -116,6 +155,9 @@ export interface Clip {
   srtPath: string | null;
   metadataPath: string | null;
   error: string | null;
+  /** Legenda de postagem sugerida pela IA. */
+  description: string | null;
+  hashtags: string[];
 }
 
 export interface Preset {

@@ -24,6 +24,19 @@ export interface RenderOverlay {
   volume?: number;
 }
 
+export interface RenderShot {
+  at: number;
+  duration: number;
+  type: 'focus' | 'wide';
+  focusX: number;
+  focusY: number;
+  scale: number;
+  /** Caixa do rosto da pessoa enquadrada (centro e tamanho, frações do quadro original). */
+  subject?: { x: number; y: number; w: number; h: number } | null;
+  /** Faixa horizontal (frações do original) com todas as pessoas — usada nos planos abertos. */
+  group?: { x0: number; x1: number } | null;
+}
+
 export interface RenderSfx {
   file: string;
   at: number;
@@ -41,8 +54,13 @@ export interface RenderSpec {
   sfx?: RenderSfx[];
   /** Conteúdo ASS (gravado na pasta de trabalho; evita escapar caminhos no filtergraph). */
   assContent?: string;
-  /** Faixa de legenda antiga a desfocar (frações da altura da fonte). */
-  removeSubtitleRegion?: { y: number; h: number } | null;
+  /** Enquadramentos (tempos relativos ao corte), aplicados sobre o vídeo original. */
+  shots?: RenderShot[];
+  /**
+   * Área útil do vídeo original (frações da altura). Usada para deixar a legenda antiga FORA do
+   * quadro: tudo (fundo, enquadramentos) passa a usar só essa faixa — sem borrões nem artefatos.
+   */
+  cleanArea?: { y0: number; y1: number } | null;
   output: string;
   workDir: string;
   hwAccel?: HwAccel;
@@ -115,40 +133,168 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
   let idx = 1;
   let label = 'src';
 
-  f.push(`[0:v]setpts=PTS-STARTPTS,fps=${fps}[src]`);
+  // Área limpa (sem a legenda antiga): recorta já na entrada; para o formato original mantém a proporção
+  let srcW = spec.source.width;
+  let srcH = spec.source.height;
+  let mapX = (x: number) => x;
+  let mapY = (y: number) => y;
+  let cleanCrop = '';
+  if (spec.cleanArea && spec.cleanArea.y1 - spec.cleanArea.y0 < 0.98) {
+    const y0 = even(spec.cleanArea.y0 * srcH);
+    const ch = Math.min(even((spec.cleanArea.y1 - spec.cleanArea.y0) * srcH), srcH - y0 - ((srcH - y0) % 2));
+    const cw = spec.format === 'original' ? Math.min(srcW, even((ch * srcW) / srcH)) : srcW - (srcW % 2);
+    const x0 = even((srcW - cw) / 2);
+    cleanCrop = `,crop=${cw}:${ch}:${x0}:${y0}`;
+    const fy0 = spec.cleanArea.y0;
+    const fh = spec.cleanArea.y1 - spec.cleanArea.y0;
+    const fx0 = x0 / srcW;
+    const fw = cw / srcW;
+    mapY = (y) => Math.min(1, Math.max(0, (y - fy0) / fh));
+    mapX = (x) => Math.min(1, Math.max(0, (x - fx0) / fw));
+    srcW = cw;
+    srcH = ch;
+  }
+  f.push(`[0:v]setpts=PTS-STARTPTS,fps=${fps}${cleanCrop}[src]`);
 
-  // 1) Legenda antiga: desfoca a faixa detectada
-  if (spec.removeSubtitleRegion) {
-    const sh = spec.source.height;
-    const y = even(spec.removeSubtitleRegion.y * sh);
-    const h = Math.min(even(spec.removeSubtitleRegion.h * sh), even(sh - y) - 2);
-    if (h > 8) {
-      // O raio do boxblur precisa ser < metade da altura do plano de croma (h/2 em yuv420p)
-      const radius = Math.max(1, Math.min(20, Math.floor(h / 4) - 1));
-      f.push(`[src]split=2[rs0][rs1]`);
-      f.push(`[rs1]crop=w=iw:h=${h}:x=0:y=${y},boxblur=luma_radius=${radius}:luma_power=3[rsb]`);
-      f.push(`[rs0][rsb]overlay=x=0:y=${y}[srcclean]`);
-      label = 'srcclean';
+  // 1) Formato de saída + enquadramentos (shots).
+  // A legenda antiga já foi removida na preparação (prepareClipSource), não aqui.
+  const baseKind = spec.format === 'vertical_crop' ? 'crop' : spec.format === 'original' ? 'scale' : 'blur';
+  const LEVELS = [1, 1.3, 1.6, 2.0];
+  const windowFor = (level: number) => {
+    let winH = srcH / level;
+    let winW = (winH * W) / H;
+    if (winW > srcW) {
+      winW = srcW / level;
+      winH = (winW * H) / W;
     }
+    return { winW: Math.min(even(winW), srcW - (srcW % 2)), winH: Math.min(even(winH), srcH - (srcH % 2)) };
+  };
+
+  /**
+   * Regra "pessoa inteira": com a caixa do rosto, a janela precisa conter a cabeça com folga em cima
+   * e a largura do corpo (~2,6x o rosto). Se a aproximação pedida cortaria a pessoa, ela é reduzida;
+   * se nem o enquadramento normal couber, o shot vira plano aberto (quadro inteiro).
+   */
+  type Placed = RenderShot & { level: number; x: number; y: number };
+  const placed: (Placed | (RenderShot & { type: 'wide' }))[] = [];
+  for (const raw of (spec.shots ?? []).filter((x) => x.at < duration && x.duration > 0.2)) {
+    const sh = { ...raw, focusX: mapX(raw.focusX), focusY: mapY(raw.focusY) };
+    if (sh.type === 'wide') {
+      placed.push({ ...sh, type: 'wide' });
+      continue;
+    }
+    const subject = raw.subject
+      ? { x: mapX(raw.subject.x) * srcW, y: mapY(raw.subject.y) * srcH, w: (raw.subject.w * spec.source.width) , h: raw.subject.h * spec.source.height }
+      : null;
+    const wanted = LEVELS.reduce((best, l) => (Math.abs(l - sh.scale) < Math.abs(best - sh.scale) ? l : best), 1);
+    let done = false;
+    // 1ª tentativa: pessoa com ombros (corpo ~2,6x o rosto). 2ª: cabeça e rosto completos com folga
+    // (vídeo original já em close). Só se nenhuma couber, abre o plano.
+    const attempts = [
+      ...LEVELS.filter((l) => l <= wanted).reverse().map((level) => ({ level, bodyFactor: 2.6 })),
+      { level: 1, bodyFactor: 1.4 },
+    ];
+    for (const { level, bodyFactor } of attempts) {
+      const { winW, winH } = windowFor(level);
+      const maxX = srcW - winW;
+      const maxY = srcH - winH;
+      if (!subject) {
+        placed.push({
+          ...sh,
+          level,
+          x: Math.round(Math.min(maxX, Math.max(0, sh.focusX * srcW - winW / 2))),
+          y: Math.round(Math.min(maxY, Math.max(0, sh.focusY * srcH - winH / 2))),
+        });
+        done = true;
+        break;
+      }
+      const bodyW = subject.w * bodyFactor;
+      const headTop = subject.y - subject.h * 0.95;
+      const chest = subject.y + subject.h * 1.8;
+      if (bodyW > winW || chest - headTop > winH) continue;
+      const x = Math.round(Math.min(maxX, Math.max(0, subject.x - winW / 2)));
+      // Cabeça no terço superior, sempre com folga acima do cabelo
+      const y = Math.round(Math.min(maxY, Math.max(0, Math.min(headTop - winH * 0.06, subject.y - winH * 0.33))));
+      // Confere se a pessoa ficou mesmo dentro (as bordas do vídeo podem impedir centralizar)
+      if (subject.x - bodyW / 2 < x - 1 || subject.x + bodyW / 2 > x + winW + 1 || headTop < y - 1) continue;
+      placed.push({ ...sh, level, x, y });
+      done = true;
+      break;
+    }
+    if (!done) placed.push({ ...sh, type: 'wide' });
   }
 
-  // 2) Formato de saída
-  if (spec.format === 'vertical_blur' || spec.format === 'square') {
+  const wideShots = baseKind === 'blur' ? [] : placed.filter((x) => x.type === 'wide');
+  const focusLevels = new Map<number, Placed[]>();
+  for (const sh of placed) {
+    if (sh.type !== 'focus' || !('level' in sh)) continue;
+    focusLevels.set(sh.level, [...(focusLevels.get(sh.level) ?? []), sh]);
+  }
+  const focusBranches = [...focusLevels.entries()]
+    .map(([level, list]) => ({ level, list, ...windowFor(level) }))
+    // Janela do tamanho do quadro inteiro = igual à base; não precisa de ramo
+    .filter((b) => !(baseKind === 'scale' && b.winW >= srcW - 2 && b.winH >= srcH - 2));
+
+  const branches = 1 + (wideShots.length ? 1 : 0) + focusBranches.length;
+  const srcLabels = Array.from({ length: branches }, (_, i) => `s${i}`);
+  if (branches > 1) f.push(`[src]split=${branches}${srcLabels.map((l) => `[${l}]`).join('')}`);
+  else srcLabels[0] = 'src';
+  let next = 0;
+
+  const blurComposite = (input: string, out: string, tag: string) => {
     const bw = even(W / 4);
     const bh = even(H / 4);
-    f.push(`[${label}]split=2[bga][fga]`);
-    f.push(`[bga]scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},boxblur=10:3,scale=${W}:${H},eq=brightness=-0.07:saturation=1.15[bg]`);
-    f.push(`[fga]scale=${W}:${H}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[fg]`);
-    f.push(`[bg][fg]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2,setsar=1[base]`);
-  } else if (spec.format === 'vertical_crop') {
-    f.push(`[${label}]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1[base]`);
-  } else {
-    f.push(`[${label}]scale=${W}:${H},setsar=1[base]`);
-  }
+    f.push(`[${input}]split=2[bga${tag}][fga${tag}]`);
+    f.push(`[bga${tag}]scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},boxblur=10:3,scale=${W}:${H},eq=brightness=-0.07:saturation=1.15[bg${tag}]`);
+    f.push(`[fga${tag}]scale=${W}:${H}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[fg${tag}]`);
+    f.push(`[bg${tag}][fg${tag}]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2,setsar=1[${out}]`);
+  };
+  const windowsExpr = (list: { at: number; duration: number }[]) =>
+    list.map((w) => `between(t,${num(Math.max(0, w.at))},${num(Math.min(duration, w.at + w.duration))})`).join('+');
+
+  const baseIn = srcLabels[next++];
+  if (baseKind === 'blur') blurComposite(baseIn, 'base', 'b');
+  else if (baseKind === 'crop') f.push(`[${baseIn}]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1[base]`);
+  else f.push(`[${baseIn}]scale=${W}:${H},setsar=1[base]`);
   label = 'base';
 
+  if (wideShots.length) {
+    // Se todos os planos abertos sabem onde estão as pessoas, recorta só essa faixa (largura fixa, posição por shot)
+    let wideIn = srcLabels[next++];
+    if (wideShots.every((w) => w.group)) {
+      const spans = wideShots.map((w) => ({ a: mapX(w.group!.x0) * srcW, b: mapX(w.group!.x1) * srcW }));
+      const rw = Math.min(srcW - (srcW % 2), even(Math.max(srcW * 0.45, ...spans.map((p) => p.b - p.a))));
+      if (rw < srcW - 4) {
+        const xs = wideShots.map((w, i) => ({ a: Math.max(0, w.at), b: Math.min(duration, w.at + w.duration), x: Math.round(Math.min(srcW - rw, Math.max(0, (spans[i].a + spans[i].b) / 2 - rw / 2))) }));
+        const nx = xs.reduceRight((acc, p) => `if(between(t,${num(p.a)},${num(p.b)}),${p.x},${acc})`, String(Math.round((srcW - rw) / 2)));
+        f.push(`[${wideIn}]crop=w=${rw}:h=${srcH - (srcH % 2)}:x='${nx}':y=0[wsrc]`);
+        wideIn = 'wsrc';
+      }
+    }
+    blurComposite(wideIn, 'wide', 'w');
+    f.push(`[${label}][wide]overlay=x=0:y=0:enable='${windowsExpr(wideShots)}'[bw]`);
+    label = 'bw';
+  }
+
+  focusBranches.forEach((b, i) => {
+    const maxX = srcW - b.winW;
+    const maxY = srcH - b.winH;
+    const pos = b.list.map((sh) => ({ a: Math.max(0, sh.at), b: Math.min(duration, sh.at + sh.duration), x: sh.x, y: sh.y }));
+    const nest = (key: 'x' | 'y', fallback: number) => pos.reduceRight((acc, p) => `if(between(t,${num(p.a)},${num(p.b)}),${p[key]},${acc})`, String(fallback));
+    f.push(
+      `[${srcLabels[next++]}]crop=w=${b.winW}:h=${b.winH}:x='${nest('x', Math.round(maxX / 2))}':y='${nest('y', Math.round(maxY / 2))}',scale=${W}:${H},setsar=1[fc${i}]`,
+    );
+    f.push(`[${label}][fc${i}]overlay=x=0:y=0:enable='${windowsExpr(b.list)}'[fo${i}]`);
+    label = `fo${i}`;
+  });
+
+  // Com enquadramento por pessoa ativo, punch-ins fortes cortariam cabeças: ficam sutis e altos
+  const personFraming = focusBranches.length > 0;
+
   // 3) Zooms (punch-in): agrupados em até 3 níveis; x/y variam por expressão em cada janela
-  const zooms = (spec.zooms ?? []).filter((z) => z.at < duration && z.duration > 0.1);
+  const zooms = (spec.zooms ?? [])
+    .filter((z) => z.at < duration && z.duration > 0.1)
+    .map((z) => (personFraming ? { ...z, scale: Math.min(z.scale, 1.12), focusY: Math.min(z.focusY, 0.35) } : z));
   const levels = new Map<number, RenderZoom[]>();
   for (const z of zooms) {
     const q = quantizeZoom(z.scale);
