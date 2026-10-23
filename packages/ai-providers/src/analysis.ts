@@ -139,6 +139,7 @@ export async function aiPlanEdits(args: {
   assetMeta?: AssetMeta;
   splitLayout?: boolean;
   catalog?: string;
+  illustrations?: boolean;
   log: Log;
   signal?: AbortSignal;
 }): Promise<Map<number, ClipEdit>> {
@@ -180,6 +181,7 @@ export async function aiPlanEdits(args: {
           assetMeta: args.assetMeta,
           splitLayout: args.splitLayout,
           catalog: args.catalog,
+          illustrations: args.illustrations,
         }),
         images: images.length ? images : undefined,
         signal: args.signal,
@@ -260,14 +262,22 @@ export async function aiSelectFromKnowledge(args: {
   settings: JobSettings;
   app: AppSettings;
   videoDuration: number;
+  /** Transcrição completa: mostra onde cada ideia começa e termina (vai junto quando cabe no orçamento). */
+  transcript?: Transcript;
   log: Log;
   signal?: AbortSignal;
 }): Promise<ClipCandidate[]> {
+  // Com IA paga a transcrição inteira vai junto (contexto completo); no gratuito, só se for curta
+  let transcriptText: string | undefined;
+  if (args.transcript) {
+    const t = compactTranscript(args.transcript);
+    if (t.length <= (args.llm.free ? 15_000 : 160_000)) transcriptText = t;
+  }
   const res = await askJson(
     args.llm,
     {
       system: withGuidelines(SELECTION_SYSTEM, args.app.editingPrompt),
-      prompt: buildSelectionFromKnowledgePrompt({ knowledge: args.knowledge, settings: args.settings, videoDuration: args.videoDuration }),
+      prompt: buildSelectionFromKnowledgePrompt({ knowledge: args.knowledge, settings: args.settings, videoDuration: args.videoDuration, transcriptText }),
       signal: args.signal,
     },
     CandidateListSchema,

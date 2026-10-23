@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { ArrowLeft, Ban, Check, CheckCircle2, Circle, CircleDot, Clapperboard, Copy, Download, PenLine, FileJson, FileText, FolderOpen, RotateCcw, XCircle } from 'lucide-react';
+import { ArrowLeft, Ban, Check, CheckCircle2, Circle, CircleDot, Clapperboard, Copy, Download, PenLine, FileJson, FileText, FolderOpen, Loader2, RotateCcw, Star, XCircle } from 'lucide-react';
 import { formatTimestamp, PIPELINE_STEPS, type Clip, type Job, type JobLog } from '@clipper/shared';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -11,18 +11,49 @@ import { JobStatusBadge, stepLabel } from '@/components/job-status';
 import { api, fileUrl } from '@/lib/client';
 import { cn } from '@/lib/utils';
 
+/** Último ajuste pedido em um corte (job de ajuste separado, mostrado só no card do corte). */
+export interface RevisionStatus {
+  id: string;
+  status: Job['status'];
+  step: string;
+  progress: number;
+  comment: string;
+  error: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+}
+
 interface DetailResponse {
   job: Job;
   clips: Clip[];
   logs: JobLog[];
+  revisions: Record<number, RevisionStatus>;
 }
+
+export const revisionActive = (r?: RevisionStatus) => !!r && (r.status === 'pending' || r.status === 'processing');
 
 export function JobDetail({ id }: { id: string }) {
   const [job, setJob] = useState<Job | null>(null);
   const [clips, setClips] = useState<Clip[]>([]);
   const [logs, setLogs] = useState<JobLog[]>([]);
+  const [revisions, setRevisions] = useState<Record<number, RevisionStatus>>({});
   const [error, setError] = useState<string | null>(null);
+  /** Cortes deste job que estão nos favoritos: índice do corte → id do favorito. */
+  const [favorites, setFavorites] = useState<Record<number, { id: string; at: string }>>({});
   const lastLog = useRef(0);
+
+  const loadFavorites = async () => {
+    const r = await api<{ favorites: { id: string; jobId: string; clipIndex: number; favoritedAt: string }[] }>('/api/favorites').catch(() => null);
+    if (!r) return;
+    const map: Record<number, { id: string; at: string }> = {};
+    // Lista vem do mais recente para o mais antigo: o primeiro de cada corte é o atual
+    for (const f of r.favorites) if (f.jobId === id && !(f.clipIndex in map)) map[f.clipIndex] = { id: f.id, at: f.favoritedAt };
+    setFavorites(map);
+  };
+  useEffect(() => {
+    loadFavorites();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
   const logBox = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -34,12 +65,13 @@ export function JobDetail({ id }: { id: string }) {
         if (!alive) return;
         setJob(r.job);
         setClips(r.clips);
+        setRevisions(r.revisions ?? {});
         if (r.logs.length) {
           lastLog.current = r.logs[r.logs.length - 1].id;
           setLogs((l) => [...l, ...r.logs].slice(-1000));
         }
         setError(null);
-        const active = r.job.status === 'processing' || r.job.status === 'pending';
+        const active = r.job.status === 'processing' || r.job.status === 'pending' || Object.values(r.revisions ?? {}).some(revisionActive);
         timer = setTimeout(tick, active ? 1200 : 5000);
       } catch (e) {
         if (!alive) return;
@@ -174,7 +206,15 @@ export function JobDetail({ id }: { id: string }) {
         {!clips.length && <p className="text-sm text-muted-foreground">Os cortes aparecem aqui após a etapa de seleção.</p>}
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {clips.map((c) => (
-            <ClipCard key={c.id} clip={c} />
+            <ClipCard
+              key={c.id}
+              clip={c}
+              revision={revisions[c.index]}
+              onRevise={(rev) => setRevisions((all) => ({ ...all, [c.index]: rev }))}
+              // Depois de reprocessar, o corte #N é outro vídeo: a estrela só vale para favoritos desta rodada
+              favoriteId={favorites[c.index] && (!job.startedAt || favorites[c.index].at >= job.startedAt) ? favorites[c.index].id : undefined}
+              onFavoriteChange={loadFavorites}
+            />
           ))}
         </div>
       </div>
@@ -246,7 +286,7 @@ function VideoInfo({ outputDir }: { outputDir: string }) {
 }
 
 /** Legenda sugerida para o post + hashtags, com botão para copiar tudo. */
-function PostText({ clip }: { clip: Clip }) {
+export function PostText({ clip }: { clip: Pick<Clip, 'title' | 'description' | 'hashtags'> }) {
   const [copied, setCopied] = useState(false);
   const text = [clip.title, clip.description, clip.hashtags.join(' ')].filter(Boolean).join('\n\n');
   return (
@@ -294,7 +334,7 @@ interface ClipMeta {
 const AUDIO_MODE: Record<string, string> = { meme: 'só o som do meme', video: 'meme mudo', both: 'meme + vídeo' };
 
 /** Memes e sons que entraram no corte, com o momento e o motivo. */
-function ClipAssets({ metadataPath }: { metadataPath: string }) {
+export function ClipAssets({ metadataPath }: { metadataPath: string }) {
   const [meta, setMeta] = useState<ClipMeta | null>(null);
   useEffect(() => {
     fetch(fileUrl(metadataPath))
@@ -332,7 +372,7 @@ function ClipAssets({ metadataPath }: { metadataPath: string }) {
 }
 
 /** Pedido de ajuste em um corte pronto: refaz só este corte (barato), sem reprocessar o vídeo. */
-function ReviseBox({ clip }: { clip: Clip }) {
+export function ReviseBox({ endpoint, onQueued }: { endpoint: string; onQueued: (rev: RevisionStatus) => void }) {
   const [open, setOpen] = useState(false);
   const [comment, setComment] = useState('');
   const [state, setState] = useState<{ ok: boolean; text: string } | null>(null);
@@ -341,9 +381,10 @@ function ReviseBox({ clip }: { clip: Clip }) {
     setSending(true);
     setState(null);
     try {
-      await api(`/api/jobs/${clip.jobId}/clips/${clip.index}/revise`, { method: 'POST', body: JSON.stringify({ comment }) });
-      setState({ ok: true, text: 'Ajuste na fila. A nova versão substitui este vídeo aqui quando ficar pronta (a anterior fica salva na pasta).' });
+      const r = await api<{ job: Job }>(endpoint, { method: 'POST', body: JSON.stringify({ comment }) });
+      onQueued({ id: r.job.id, status: 'pending', step: r.job.step, progress: 0, comment, error: null, finishedAt: null, createdAt: r.job.createdAt });
       setComment('');
+      setOpen(false);
     } catch (e) {
       setState({ ok: false, text: (e as Error).message });
     } finally {
@@ -379,11 +420,92 @@ function ReviseBox({ clip }: { clip: Clip }) {
   );
 }
 
-function ClipCard({ clip }: { clip: Clip }) {
-  const thumb = clip.outputPath?.replace(/\.mp4$/, '.jpg');
+/** Andamento do ajuste no próprio card: carregando, atualizado ou falhou. */
+export function RevisionBanner({ rev }: { rev: RevisionStatus }) {
+  if (revisionActive(rev))
+    return (
+      <div className="space-y-1 rounded-md border border-primary/40 bg-primary/10 p-2 text-xs">
+        <p className="flex items-center gap-1.5 font-medium text-primary">
+          <Loader2 className="size-3.5 animate-spin" /> {rev.status === 'pending' ? 'Ajuste na fila…' : `Ajustando… ${(rev.progress * 100).toFixed(0)}%`}
+        </p>
+        <Progress value={rev.progress * 100} />
+        <p className="line-clamp-2 text-muted-foreground">“{rev.comment}”</p>
+      </div>
+    );
+  if (rev.status === 'failed')
+    return (
+      <div className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
+        <p className="font-medium">O ajuste falhou — o vídeo anterior foi mantido.</p>
+        {rev.error && <p className="mt-0.5 line-clamp-3 whitespace-pre-wrap">{rev.error}</p>}
+      </div>
+    );
+  // Concluído há pouco: destaca que o vídeo acima já é a versão nova
+  const recent = rev.status === 'completed' && rev.finishedAt && Date.now() - new Date(rev.finishedAt).getTime() < 30 * 60 * 1000;
+  if (!recent) return null;
   return (
-    <Card className="overflow-hidden">
-      <div className="grid aspect-video place-items-center bg-black/50">
+    <p className="flex items-center gap-1.5 rounded-md border border-success/40 bg-success/10 p-2 text-xs font-medium text-success">
+      <CheckCircle2 className="size-3.5" /> Vídeo atualizado com o ajuste ({new Date(rev.finishedAt!).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })})
+    </p>
+  );
+}
+
+/** Estrela do corte: favorita (copia para a aba Favoritos) ou remove dos favoritos. */
+function FavoriteButton({ clip, favoriteId, onChange }: { clip: Clip; favoriteId?: string; onChange: () => void }) {
+  const [busy, setBusy] = useState(false);
+  async function toggle() {
+    setBusy(true);
+    try {
+      if (favoriteId) {
+        if (!confirm('Remover dos favoritos? A cópia guardada (e os ajustes feitos nela) será apagada.')) return;
+        await api(`/api/favorites/${favoriteId}`, { method: 'DELETE' });
+      } else {
+        await api('/api/favorites', { method: 'POST', body: JSON.stringify({ jobId: clip.jobId, clipIndex: clip.index }) });
+      }
+      onChange();
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <button
+      type="button"
+      onClick={toggle}
+      disabled={busy}
+      title={favoriteId ? 'Favoritado — clique para remover' : 'Favoritar (guarda uma cópia na aba Favoritos)'}
+      className={cn('rounded p-0.5 transition-colors hover:bg-accent disabled:opacity-50', favoriteId ? 'text-yellow-400' : 'text-muted-foreground')}
+    >
+      <Star className={cn('size-4', favoriteId && 'fill-current')} />
+    </button>
+  );
+}
+
+function ClipCard({
+  clip,
+  revision,
+  onRevise,
+  favoriteId,
+  onFavoriteChange,
+}: {
+  clip: Clip;
+  revision?: RevisionStatus;
+  onRevise: (rev: RevisionStatus) => void;
+  favoriteId?: string;
+  onFavoriteChange: () => void;
+}) {
+  const thumb = clip.outputPath?.replace(/\.mp4$/, '.jpg');
+  const revising = revisionActive(revision);
+  return (
+    <Card className={cn('overflow-hidden', revising && 'ring-2 ring-primary/50')}>
+      <div className="relative grid aspect-video place-items-center bg-black/50">
+        {revising && (
+          <div className="absolute inset-0 z-10 grid place-items-center bg-black/60 text-sm text-white">
+            <span className="flex items-center gap-2">
+              <Loader2 className="size-5 animate-spin" /> {revision!.status === 'pending' ? 'Na fila…' : `Ajustando ${(revision!.progress * 100).toFixed(0)}%`}
+            </span>
+          </div>
+        )}
         {clip.status === 'completed' && clip.outputPath ? (
           <video key={clip.outputPath} src={fileUrl(clip.outputPath)} poster={thumb ? fileUrl(thumb) : undefined} controls preload="none" className="h-full max-h-[420px] w-full object-contain" />
         ) : clip.status === 'failed' ? (
@@ -396,6 +518,7 @@ function ClipCard({ clip }: { clip: Clip }) {
         <div className="flex items-start gap-2">
           <span className="text-xs font-mono text-muted-foreground">#{String(clip.index + 1).padStart(3, '0')}</span>
           <p className="flex-1 text-sm font-medium leading-snug">{clip.title}</p>
+          {clip.status === 'completed' && <FavoriteButton clip={clip} favoriteId={favoriteId} onChange={onFavoriteChange} />}
           <Badge variant={clip.score >= 75 ? 'success' : clip.score >= 55 ? 'default' : 'secondary'}>{clip.score}</Badge>
         </div>
         <p className="text-xs text-muted-foreground">
@@ -404,7 +527,8 @@ function ClipCard({ clip }: { clip: Clip }) {
         {clip.reason && <p className="line-clamp-3 text-xs text-muted-foreground">{clip.reason}</p>}
         {(clip.description || clip.hashtags.length > 0) && <PostText clip={clip} />}
         {clip.status === 'completed' && clip.metadataPath && <ClipAssets key={clip.metadataPath} metadataPath={clip.metadataPath} />}
-        {clip.status === 'completed' && <ReviseBox clip={clip} />}
+        {revision && <RevisionBanner rev={revision} />}
+        {clip.status === 'completed' && !revising && <ReviseBox endpoint={`/api/jobs/${clip.jobId}/clips/${clip.index}/revise`} onQueued={onRevise} />}
         {clip.error && <p className="line-clamp-4 text-xs whitespace-pre-wrap text-destructive">{clip.error}</p>}
         {clip.status === 'completed' && clip.outputPath && (
           <div className="flex flex-wrap gap-1.5 pt-1">

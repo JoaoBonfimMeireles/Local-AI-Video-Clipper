@@ -14,12 +14,12 @@ const TYPES: Record<string, string> = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
-/** Serve arquivos de data/output (somente) com suporte a Range para o player de vídeo. */
+/** Serve arquivos de data/output e data/favorites (somente) com suporte a Range para o player de vídeo. */
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const p = url.searchParams.get('path') ?? '';
   const full = path.resolve(p);
-  if (!p || !isInside(dataPaths.output, full) || !fs.existsSync(full) || !fs.statSync(full).isFile()) {
+  if (!p || !(isInside(dataPaths.output, full) || isInside(dataPaths.favorites, full)) || !fs.existsSync(full) || !fs.statSync(full).isFile()) {
     return new Response('Não encontrado', { status: 404 });
   }
   const ext = path.extname(full).toLowerCase();

@@ -49,7 +49,8 @@ export interface JobSettings {
   creditUrl: string;
   mode: ContentMode;
   /** Job de AJUSTE: refaz só um corte já pronto a partir de um comentário (não reprocessa o vídeo). */
-  revision?: { parentJobId: string; clipIndex: number; comment: string } | null;
+  /** Ajuste de um corte pronto. Com `favoriteId`, ajusta a cópia guardada nos favoritos (e não o corte do job). */
+  revision?: { parentJobId: string; clipIndex: number; comment: string; favoriteId?: string } | null;
   /** Job que só analisa os clipes de referência (gera o guia de estilo), sem vídeo de entrada. */
   analyzeReferences?: boolean;
   /** Modo Twitch: quais tipos de momento procurar. */
@@ -86,6 +87,8 @@ export interface AppSettings {
   subtitleRemoval: 'crop' | 'inpaint';
   /** Usa o guia de estilo aprendido dos clipes em data/references nas seleções e edições. */
   useReferences: boolean;
+  /** Claude que escolhe os cortes (o mais capaz). */
+  anthropicSelectModel: string;
   anthropicModel: string;
   ollamaUrl: string;
   ollamaModel: string;
@@ -94,6 +97,8 @@ export interface AppSettings {
   threads: number;
   hwAccel: HwAccel;
   sendFramesToAI: boolean;
+  /** Ilustra o que é falado (avião, filme, pessoa) com imagens de bancos de licença livre. */
+  useIllustrations: boolean;
 }
 
 export const DEFAULT_JOB_SETTINGS: JobSettings = {
@@ -127,6 +132,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   ptTranscript: true,
   subtitleRemoval: 'crop',
   useReferences: true,
+  anthropicSelectModel: 'claude-opus-5-5',
   anthropicModel: 'claude-sonnet-5-5',
   ollamaUrl: 'http://127.0.0.1:11434',
   ollamaModel: 'llama3',
@@ -135,6 +141,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   threads: 4,
   hwAccel: 'none',
   sendFramesToAI: true,
+  useIllustrations: true,
 };
 
 export interface Job {
@@ -189,6 +196,26 @@ export interface Clip {
   /** Legenda de postagem sugerida pela IA. */
   description: string | null;
   hashtags: string[];
+}
+
+/** Corte favoritado: cópia independente do job (sobrevive a reprocessar ou excluir o job). */
+export interface Favorite {
+  id: string;
+  jobId: string;
+  clipIndex: number;
+  videoName: string;
+  title: string;
+  description: string | null;
+  hashtags: string[];
+  /** Pasta própria em data/favorites/<id> com vídeo, capa, SRT, metadados e transcrição. */
+  dir: string;
+  videoPath: string;
+  srtPath: string | null;
+  metadataPath: string;
+  duration: number;
+  /** Quando foi favoritado (ISO). */
+  favoritedAt: string;
+  updatedAt: string;
 }
 
 export interface Preset {

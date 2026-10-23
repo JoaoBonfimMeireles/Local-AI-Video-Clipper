@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { HwAccel, OutputFormat } from '@clipper/shared';
+import { insertSoundPauses, type SoundPause } from './pauses';
 import { runFfmpeg, sec } from './ffmpeg';
 
 export type OverlayPosition = 'center' | 'top' | 'bottom' | 'top-left' | 'top-right';
@@ -75,6 +76,10 @@ export interface RenderSpec {
    * no quadro original (frações: x0, y0, x1, y1). game = centro horizontal do jogo (0-1).
    */
   split?: { cam: { x0: number; y0: number; x1: number; y1: number }; gameX?: number; camRatio?: number } | null;
+  /** Efeitos sonoros com o vídeo pausado (congelado) enquanto tocam — não atropelam a fala. */
+  pauses?: SoundPause[];
+  /** Área do conteúdo no quadro original (ex.: o vídeo assistido num react), sem a facecam nem molduras. */
+  content?: { x0: number; y0: number; x1: number; y1: number } | null;
   output: string;
   workDir: string;
   hwAccel?: HwAccel;
@@ -113,19 +118,23 @@ function overlayInputArgs(file: string, duration: number): string[] {
   return ['-stream_loop', '-1', '-t', t, '-i', file];
 }
 
-function overlayXY(pos: OverlayPosition, vertical: boolean): string {
+/** Posição do meme. O meme inteiro fica SEMPRE dentro do quadro: "bottom" encosta a base do meme perto da
+ * borda de baixo (personagem de green screen aparece de corpo inteiro, nunca só o topo da cabeça). */
+function overlayXY(pos: OverlayPosition, _vertical: boolean): string {
+  // Entre aspas: as vírgulas do max/min não podem separar opções do filtro
+  const inside = (y: string) => `'max(0,min(main_h-overlay_h,${y}))'`;
   switch (pos) {
     case 'center':
       return 'x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2';
     case 'bottom':
-      return vertical ? 'x=(main_w-overlay_w)/2:y=main_h*0.76' : 'x=(main_w-overlay_w)/2:y=main_h*0.42';
+      return `x=(main_w-overlay_w)/2:y=${inside('main_h*0.97-overlay_h')}`;
     case 'top-left':
-      return 'x=main_w*0.04:y=main_h*0.06';
+      return `x=main_w*0.04:y=${inside('main_h*0.06')}`;
     case 'top-right':
-      return 'x=main_w*0.96-overlay_w:y=main_h*0.06';
+      return `x=main_w*0.96-overlay_w:y=${inside('main_h*0.06')}`;
     case 'top':
     default:
-      return 'x=(main_w-overlay_w)/2:y=main_h*0.07';
+      return `x=(main_w-overlay_w)/2:y=${inside('main_h*0.07')}`;
   }
 }
 
@@ -256,18 +265,28 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
   else srcLabels[0] = 'src';
   let next = 0;
 
-  const blurComposite = (input: string, out: string, tag: string) => {
-    const bw = even(W / 4);
-    const bh = even(H / 4);
+  const blurComposite = (input: string, out: string, tag: string, OW = W, OH = H) => {
+    const bw = even(OW / 4);
+    const bh = even(OH / 4);
     f.push(`[${input}]split=2[bga${tag}][fga${tag}]`);
-    f.push(`[bga${tag}]scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},boxblur=10:3,scale=${W}:${H},eq=brightness=-0.07:saturation=1.15[bg${tag}]`);
-    f.push(`[fga${tag}]scale=${W}:${H}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[fg${tag}]`);
+    f.push(`[bga${tag}]scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},boxblur=10:3,scale=${OW}:${OH},eq=brightness=-0.07:saturation=1.15[bg${tag}]`);
+    f.push(`[fga${tag}]scale=${OW}:${OH}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[fg${tag}]`);
     f.push(`[bg${tag}][fg${tag}]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2,setsar=1[${out}]`);
   };
   const windowsExpr = (list: { at: number; duration: number }[]) =>
     list.map((w) => `between(t,${num(Math.max(0, w.at))},${num(Math.min(duration, w.at + w.duration))})`).join('+');
 
   const baseIn = srcLabels[next++];
+  // Retângulo do conteúdo em pixels da fonte (mesmo mapeamento da facecam)
+  const content = spec.content
+    ? (() => {
+        const x = Math.max(0, Math.round(mapX(spec.content.x0) * srcW));
+        const y = Math.max(0, Math.round(mapY(spec.content.y0) * srcH));
+        const w = even(Math.min(srcW - x, mapX(spec.content.x1) * srcW - x));
+        const h = even(Math.min(srcH - y, mapY(spec.content.y1) * srcH - y));
+        return w > 32 && h > 32 ? { x, y, w, h } : null;
+      })()
+    : null;
   if (split) {
     // Facecam (em cima) + jogo (embaixo): cada parte recortada na proporção exata da sua área
     const topH = even(H * Math.min(0.5, Math.max(0.25, split.camRatio ?? 0.38)));
@@ -285,11 +304,33 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
     };
     const cam = split.cam;
     const camBox = fit(((mapX(cam.x0) + mapX(cam.x1)) / 2) * srcW, ((mapY(cam.y0) + mapY(cam.y1)) / 2) * srcH, (mapX(cam.x1) - mapX(cam.x0)) * srcW, (mapY(cam.y1) - mapY(cam.y0)) * srcH, W / topH);
-    const gameBox = fit((split.gameX ?? 0.5) * srcW, srcH / 2, 0, srcH, W / botH);
     f.push(`[${baseIn}]split=2[cam0][game0]`);
     f.push(`[cam0]crop=${camBox.w}:${camBox.h}:${camBox.x}:${camBox.y},scale=${W}:${topH},setsar=1[camv]`);
-    f.push(`[game0]crop=${gameBox.w}:${gameBox.h}:${gameBox.x}:${gameBox.y},scale=${W}:${botH},setsar=1[gamev]`);
+    if (content) {
+      // React: o vídeo assistido INTEIRO embaixo, sem pedaço da facecam. Proporção parecida → preenche;
+      // muito diferente → mostra inteiro com fundo desfocado (nunca corta o conteúdo)
+      f.push(`[game0]crop=${content.w}:${content.h}:${content.x}:${content.y},setsar=1[gcrop]`);
+      const ratio = content.w / content.h / (W / botH);
+      if (ratio > 0.85 && ratio < 1.18) f.push(`[gcrop]scale=${W}:${botH}:force_original_aspect_ratio=increase,crop=${W}:${botH},setsar=1[gamev]`);
+      else blurComposite('gcrop', 'gamev', 'g', W, botH);
+    } else {
+      // Sem área de conteúdo detectada: recorte do jogo que NÃO invade a facecam (fica do outro lado dela)
+      const camL = mapX(cam.x0) * srcW;
+      const camR = mapX(cam.x1) * srcW;
+      const free = camL > srcW - camR ? { a: 0, b: camL } : { a: camR, b: srcW };
+      const want = srcH * (W / botH);
+      const gameBox = free.b - free.a >= want * 0.8 ? fit((free.a + free.b) / 2, srcH / 2, 0, srcH, W / botH) : fit((split.gameX ?? 0.5) * srcW, srcH / 2, 0, srcH, W / botH);
+      if (gameBox.x < free.a || gameBox.x + gameBox.w > free.b) {
+        // Não cabe ao lado da cam com a altura toda: encaixa a faixa livre inteira com fundo desfocado
+        f.push(`[game0]crop=${even(free.b - free.a)}:${even(srcH)}:${Math.round(free.a)}:0,setsar=1[gcrop]`);
+        blurComposite('gcrop', 'gamev', 'g', W, botH);
+      } else f.push(`[game0]crop=${gameBox.w}:${gameBox.h}:${gameBox.x}:${gameBox.y},scale=${W}:${botH},setsar=1[gamev]`);
+    }
     f.push(`[camv][gamev]vstack=inputs=2,setsar=1[base]`);
+  } else if (baseKind === 'blur' && content) {
+    // Só o conteúdo (sem molduras/fundo de overlay da live) centralizado, com fundo desfocado
+    f.push(`[${baseIn}]crop=${content.w}:${content.h}:${content.x}:${content.y},setsar=1[ccrop]`);
+    blurComposite('ccrop', 'base', 'b');
   } else if (baseKind === 'blur') blurComposite(baseIn, 'base', 'b');
   else if (baseKind === 'crop') f.push(`[${baseIn}]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1[base]`);
   else f.push(`[${baseIn}]scale=${W}:${H},setsar=1[base]`);
@@ -378,12 +419,14 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
     inputs.push(...overlayInputArgs(o.file, dur));
     const k = idx++;
     const ow = even(W * Math.min(1, Math.max(0.1, o.scale)));
+    // Meme alto (vertical) não pode passar de ~45% da altura: encolhe mantendo a proporção
+    const oh = even(H * (vertical ? 0.45 : 0.7));
     const fadeOut = Math.max(o.at, o.at + dur - 0.15);
     // Fundo verde vira transparente; despill tira o reflexo verde das bordas do recorte
     const key = o.keyColor && /^0x[0-9a-fA-F]{6}$/.test(o.keyColor) ? o.keyColor : '0x00FF00';
     const chroma = o.greenScreen ? `format=yuv420p,chromakey=color=${key}:similarity=0.16:blend=0.06,despill=type=green,` : '';
     f.push(
-      `[${k}:v]${chroma}scale=${ow}:-2,format=rgba,setpts=PTS-STARTPTS+${num(o.at)}/TB,fade=t=in:st=${num(o.at)}:d=0.12:alpha=1,fade=t=out:st=${num(fadeOut)}:d=0.15:alpha=1[ov${i}]`,
+      `[${k}:v]${chroma}scale=${ow}:${oh}:force_original_aspect_ratio=decrease:force_divisible_by=2,format=rgba,setpts=PTS-STARTPTS+${num(o.at)}/TB,fade=t=in:st=${num(o.at)}:d=0.12:alpha=1,fade=t=out:st=${num(fadeOut)}:d=0.15:alpha=1[ov${i}]`,
     );
     f.push(`[${label}][ov${i}]overlay=${overlayXY(o.position, vertical)}:enable='between(t,${num(o.at)},${num(o.at + dur)})':eof_action=pass[vo${i}]`);
     label = `vo${i}`;
@@ -457,6 +500,23 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
 }
 
 export async function renderClip(spec: RenderSpec): Promise<void> {
+  const pauses = (spec.pauses ?? []).filter((p) => p.at > 0.1);
+  if (pauses.length) {
+    // 1) corte normal num arquivo intermediário; 2) pausas inseridas no vídeo final
+    const base = path.join(spec.workDir, 'before_pauses.mp4');
+    await renderClip({ ...spec, pauses: [], output: base, onProgress: (p) => spec.onProgress?.(p * 0.85) });
+    const duration = spec.end - spec.start;
+    const codec = (hw: string | undefined) =>
+      hw === 'nvenc' ? ['-c:v', 'h264_nvenc', '-preset', 'p5', '-rc', 'vbr', '-cq', '23', '-b:v', '0'] : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-profile:v', 'high'];
+    try {
+      await insertSoundPauses({ input: base, output: spec.output, pauses, duration, videoCodec: codec(spec.hwAccel), signal: spec.signal });
+    } catch (e) {
+      if (spec.hwAccel !== 'nvenc' || spec.signal?.aborted) throw e;
+      await insertSoundPauses({ input: base, output: spec.output, pauses, duration, videoCodec: codec('none'), signal: spec.signal });
+    }
+    spec.onProgress?.(1);
+    return;
+  }
   fs.mkdirSync(spec.workDir, { recursive: true });
   fs.mkdirSync(path.dirname(spec.output), { recursive: true });
   let subsName: string | null = null;

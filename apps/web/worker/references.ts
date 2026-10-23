@@ -24,11 +24,20 @@ export interface ReferenceInfo {
 
 const cacheDir = () => path.join(dataPaths.root, 'cache', 'references');
 
+/** Vídeos em data/references, inclusive em subpastas (cada subpasta = um nicho com guia próprio). */
+function walk(dir: string, rel = ''): string[] {
+  const out: string[] = [];
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const r = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) out.push(...walk(path.join(dir, e.name), r));
+    else if (VIDEO_EXT.includes(path.extname(e.name).toLowerCase())) out.push(r);
+  }
+  return out;
+}
+
 export function listReferences(): ReferenceInfo[] {
   if (!fs.existsSync(dataPaths.references)) return [];
-  return fs
-    .readdirSync(dataPaths.references)
-    .filter((f) => VIDEO_EXT.includes(path.extname(f).toLowerCase()))
+  return walk(dataPaths.references)
     .sort()
     .map((name) => {
       const file = path.join(dataPaths.references, name);
@@ -43,8 +52,13 @@ export function listReferences(): ReferenceInfo[] {
     });
 }
 
+/** Nicho = subpasta (vazio para vídeos soltos na raiz). */
+const nicheOf = (r: ReferenceInfo) => (r.name.includes('/') ? r.name.slice(0, r.name.lastIndexOf('/')) : '');
+const baseName = (r: ReferenceInfo) => path.parse(r.name).name.replace(/^vidssave\.com\s*/i, '');
+
 async function analyzeReference(ref: ReferenceInfo, app: AppSettings, llm: LLMProvider, log: Log, signal?: AbortSignal): Promise<void> {
-  const work = path.join(dataPaths.temp, `ref-${ref.key}`);
+  // Pasta nova a cada tentativa: a de um job cancelado pode ficar travada (EPERM) no exFAT
+  const work = path.join(dataPaths.temp, `ref-${ref.key}-${Date.now()}`);
   fs.mkdirSync(work, { recursive: true });
   try {
     const info = await probe(ref.file, signal);
@@ -77,7 +91,7 @@ async function analyzeReference(ref: ReferenceInfo, app: AppSettings, llm: LLMPr
       {
         system: REFERENCE_SYSTEM,
         prompt: buildReferencePrompt({
-          name: path.parse(ref.name).name,
+          name: baseName(ref),
           transcript: transcriptText.slice(0, 6000),
           stats: statsText,
           visualNotes: frames.length ? frames.map((f, i) => `imagem ${i + 1}: t=${f.time.toFixed(1)}s`).join('\n') : undefined,
@@ -150,18 +164,26 @@ export async function getStyleGuide(args: { app: AppSettings; llm: LLMProvider |
   const file = path.join(cacheDir(), `guide-${guideKey(analyzed)}.json`);
   if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8')).guide as string;
 
-  let guide: string;
-  if (analyzed.length === 1 || !args.llm) {
-    guide = analyzed.map((r) => styleToText(r.style!)).join('\n');
-  } else {
-    const res = await askJson(
-      args.llm,
-      { system: 'Você é um editor-chefe de clipes virais. Responda SOMENTE com JSON válido.', prompt: buildStyleGuidePrompt(analyzed.map((r) => ({ name: path.parse(r.name).name, style: r.style }))), signal: args.signal },
-      StyleGuideSchema,
-      args.log,
-    );
-    guide = res.guide;
+  // Um guia por nicho (subpasta); a IA aplica o nicho que combina com o vídeo
+  const groups = new Map<string, ReferenceInfo[]>();
+  for (const r of analyzed) groups.set(nicheOf(r), [...(groups.get(nicheOf(r)) ?? []), r]);
+  const parts: string[] = [];
+  for (const [niche, list] of groups) {
+    let g: string;
+    if (list.length === 1 || !args.llm) {
+      g = list.map((r) => styleToText(r.style!)).join('\n');
+    } else {
+      const res = await askJson(
+        args.llm,
+        { system: 'Você é um editor-chefe de clipes virais. Responda SOMENTE com JSON válido.', prompt: buildStyleGuidePrompt(list.map((r) => ({ name: baseName(r), style: r.style }))), signal: args.signal },
+        StyleGuideSchema,
+        args.log,
+      );
+      g = res.guide;
+    }
+    parts.push(groups.size > 1 && niche ? `[Nicho: ${niche}] (use quando o vídeo for desse tipo)\n${g}` : g);
   }
+  const guide = parts.join('\n\n');
   fs.mkdirSync(cacheDir(), { recursive: true });
   fs.writeFileSync(file, JSON.stringify({ guide, refs: analyzed.map((r) => r.name), createdAt: new Date().toISOString() }));
   args.log('info', `Guia de estilo atualizado a partir de ${analyzed.length} referência(s)`);

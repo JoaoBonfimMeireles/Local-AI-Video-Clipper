@@ -72,6 +72,11 @@ async function postJson(url: string, body: unknown, headers: Record<string, stri
 
 /** Preço público por 1M tokens (US$) — usado só para estimar custo nos logs. Saída inclui "thinking". */
 const GEMINI_PRICES: { match: RegExp; input: number; output: number }[] = [
+  { match: /claude-opus-5-5/i, input: 4.0, output: 20.0 },
+  { match: /claude-opus/i, input: 5.0, output: 25.0 },
+  { match: /claude-sonnet/i, input: 2.0, output: 10.0 },
+  { match: /claude-haiku-5/i, input: 0.1, output: 0.5 },
+  { match: /claude-fable/i, input: 10.0, output: 50.0 },
   { match: /pro/i, input: 2.0, output: 12.0 },
   { match: /3\.[68]-flash/i, input: 0.75, output: 3.75 },
   { match: /flash-lite/i, input: 0.25, output: 1.5 },
@@ -199,36 +204,111 @@ function retryDelayMs(body: string): number | null {
   return m ? Math.min(90_000, Math.ceil(Number(m[1]) * 1000) + 500) : null;
 }
 
+type AnthropicEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/**
+ * Claude via Messages API com streaming (SSE): respostas longas com raciocínio não estouram o tempo
+ * limite de cabeçalhos do fetch. Pensamento adaptativo sempre ligado; a profundidade vem do `effort`.
+ */
 class AnthropicProvider implements LLMProvider {
   name = 'anthropic';
   supportsImages = true;
-  maxPromptChars = 400_000;
+  maxPromptChars = 600_000;
   free = false;
   usage: LLMUsage = { calls: 0, inputTokens: 0, outputTokens: 0 };
+  onNotice?: (msg: string) => void;
   constructor(
     public model: string,
     private apiKey: string,
+    private effort: AnthropicEffort,
   ) {}
   async complete(req: LLMRequest): Promise<string> {
     const content: any[] = (req.images ?? []).map((img) => ({ type: 'image', source: { type: 'base64', media_type: img.mimeType, data: img.base64 } }));
     content.push({ type: 'text', text: req.prompt });
-    const json = await postJson(
-      'https://api.anthropic.com/v1/messages',
-      {
-        model: this.model,
-        max_tokens: req.maxTokens ?? 16000,
-        temperature: req.temperature ?? 0.4,
-        system: req.system,
-        messages: [{ role: 'user', content }],
-      },
-      { 'x-api-key': this.apiKey, 'anthropic-version': '2023-06-01' },
-      req.signal,
-    );
+    // Fallback no servidor (Opus/Sonnet 5.5): se o modelo recusar por política, outro modelo responde na mesma chamada
+    const fallback = /claude-(opus-5|sonnet-5-5|fable)/i.test(this.model);
+    const body = {
+      model: this.model,
+      max_tokens: req.maxTokens && req.maxTokens > 4000 ? req.maxTokens : 32000,
+      stream: true,
+      thinking: { type: 'adaptive' },
+      output_config: { effort: this.effort },
+      system: req.system,
+      messages: [{ role: 'user', content }],
+      ...(fallback ? { fallbacks: 'default' } : {}),
+    };
+    const headers: Record<string, string> = {
+      'content-type': 'application/json',
+      'x-api-key': this.apiKey,
+      'anthropic-version': '2023-06-01',
+      ...(fallback ? { 'anthropic-beta': 'server-side-fallback-2026-07-01' } : {}),
+    };
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.streamOnce(body, headers, req.signal);
+      } catch (e) {
+        if (req.signal?.aborted) throw e;
+        const status = e instanceof HttpError ? e.status : 0;
+        // 429 (limite), 529 (sobrecarga), 5xx e falhas de rede: espera e tenta de novo
+        const retryable = status === 429 || status === 529 || status >= 500 || (!status && /fetch failed|network|ECONNRESET|terminated/i.test(String((e as Error).message)));
+        if (!retryable || attempt >= 4) throw e;
+        const wait = 5000 * attempt * attempt;
+        this.onNotice?.(`Claude ${status || 'rede'}: tentando de novo em ${Math.round(wait / 1000)}s (${attempt}/3)`);
+        await sleep(wait, req.signal);
+      }
+    }
+  }
+
+  private async streamOnce(body: unknown, headers: Record<string, string>, signal?: AbortSignal): Promise<string> {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20 * 60_000)]) : AbortSignal.timeout(20 * 60_000),
+    });
+    if (!res.ok || !res.body) throw new HttpError(res.status, await res.text(), 'api.anthropic.com');
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let text = '';
+    let stop = '';
+    let refusal = '';
+    let inTok = 0;
+    let outTok = 0;
+    const handle = (ev: any) => {
+      switch (ev.type) {
+        case 'message_start':
+          inTok += (ev.message?.usage?.input_tokens ?? 0) + (ev.message?.usage?.cache_read_input_tokens ?? 0);
+          break;
+        case 'content_block_delta':
+          if (ev.delta?.type === 'text_delta') text += ev.delta.text;
+          break;
+        case 'message_delta':
+          stop = ev.delta?.stop_reason ?? stop;
+          if (ev.delta?.stop_details?.category) refusal = ev.delta.stop_details.category;
+          outTok = ev.usage?.output_tokens ?? outTok;
+          break;
+        case 'error':
+          throw new HttpError(ev.error?.type === 'overloaded_error' ? 529 : 500, JSON.stringify(ev.error), 'api.anthropic.com');
+      }
+    };
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (line.startsWith('data:')) handle(JSON.parse(line.slice(5)));
+      }
+    }
     this.usage.calls++;
-    this.usage.inputTokens += json.usage?.input_tokens ?? 0;
-    this.usage.outputTokens += json.usage?.output_tokens ?? 0;
-    const text = (json.content ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('');
-    if (!text) throw new Error(`Anthropic sem resposta: ${JSON.stringify(json).slice(0, 300)}`);
+    this.usage.inputTokens += inTok;
+    this.usage.outputTokens += outTok;
+    if (stop === 'refusal') throw new Error(`Claude recusou o pedido${refusal ? ` (${refusal})` : ''}`);
+    if (stop === 'max_tokens' && !text.trim().endsWith('}')) throw new Error('Resposta do Claude cortada (limite de tokens)');
+    if (!text) throw new Error('Claude sem resposta');
     return text;
   }
 }
@@ -290,7 +370,9 @@ export function createLLM(settings: AppSettings, role: LLMRole = 'edit'): LLMPro
     case 'anthropic': {
       const key = getEnvValue('ANTHROPIC_API_KEY');
       if (!key) throw new Error('ANTHROPIC_API_KEY não configurada (Configurações ou .env.local)');
-      return new AnthropicProvider(settings.anthropicModel || 'claude-sonnet-5-5', key);
+      // Opus escolhe os cortes (raciocínio alto); Sonnet faz edição/textos; tradução com pouco raciocínio
+      const model = role === 'select' ? settings.anthropicSelectModel || 'claude-opus-5-5' : settings.anthropicModel || 'claude-sonnet-5-5';
+      return new AnthropicProvider(model, key, role === 'select' ? 'high' : role === 'translate' ? 'low' : 'medium');
     }
     case 'ollama': {
       const url = settings.ollamaUrl || 'http://127.0.0.1:11434';
@@ -309,7 +391,7 @@ export function imageFromFile(file: string): LLMImage {
 /** Teste rápido de conectividade (usado na tela de Configurações): testa cada modelo usado pelo plano. */
 export async function pingLLM(settings: AppSettings): Promise<{ ok: boolean; message: string }> {
   try {
-    const roles: LLMRole[] = settings.aiProvider === 'gemini' && settings.geminiPlan === 'hybrid' ? ['select', 'edit'] : ['edit'];
+    const roles: LLMRole[] = (settings.aiProvider === 'gemini' && settings.geminiPlan === 'hybrid') || settings.aiProvider === 'anthropic' ? ['select', 'edit'] : ['edit'];
     const msgs: string[] = [];
     for (const role of roles) {
       const llm = createLLM(settings, role);

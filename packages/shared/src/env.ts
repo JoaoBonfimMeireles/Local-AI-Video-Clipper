@@ -3,7 +3,7 @@ import path from 'node:path';
 import { getRepoRoot } from './paths';
 
 /** Chaves que a UI pode gravar em .env.local. Nada fora desta lista é aceito. */
-export const SECRET_KEYS = ['GEMINI_API_KEY', 'ANTHROPIC_API_KEY'] as const;
+export const SECRET_KEYS = ['GEMINI_API_KEY', 'ANTHROPIC_API_KEY', 'PIXABAY_API_KEY', 'TMDB_API_KEY'] as const;
 export type SecretKey = (typeof SECRET_KEYS)[number];
 
 function envFilePath(): string {

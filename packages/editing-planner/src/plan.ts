@@ -1,6 +1,6 @@
 import type { Intensity, JobSettings, LibraryIndex, TranscriptWord } from '@clipper/shared';
 import { resolveLibraryFile, type LibraryKind } from '@clipper/shared/server';
-import type { ClipEdit, Overlay, Sfx, Shot, Zoom } from './schemas';
+import type { ClipEdit, Illustration, Overlay, Sfx, Shot, Zoom } from './schemas';
 import { findAssetsByKeywords, matchAssetByName } from './library-select';
 
 // ---------------- Limites por intensidade ----------------
@@ -45,8 +45,17 @@ export function normalizeEdit(edit: ClipEdit, duration: number, settings: JobSet
     }
   }
 
+  // Ilustrações: uma por vez, com respiro entre elas (informam, não poluem)
+  const illustrations: Illustration[] = [];
+  for (const il of [...(edit.illustrations ?? [])].filter((x) => x.at < duration - 0.8).sort((a, b) => a.at - b.at)) {
+    const prev = illustrations[illustrations.length - 1];
+    if (prev && il.at < prev.at + prev.duration + 2) continue;
+    illustrations.push({ ...il, duration: Math.min(il.duration, duration - il.at) });
+  }
+
   return {
     clipIndex: edit.clipIndex,
+    illustrations: illustrations.slice(0, Math.max(1, Math.round(duration / (settings.intensity === 'high' ? 6 : 10)))),
     shots: normalizeShots(edit.shots ?? [], duration),
     zooms: zooms.slice(0, cap(lim.zoomsPerMin, duration)),
     overlays: overlays.slice(0, cap(lim.memesPerMin, duration)).slice(0, settings.intensity === 'low' ? 0 : 30),
@@ -262,7 +271,7 @@ export function heuristicEdit(args: {
     }
   }
   return normalizeEdit(
-    { clipIndex: args.clipIndex, zooms, overlays: overlays.sort((a, b) => a.at - b.at), sfx: sfx.sort((a, b) => a.at - b.at), emphasisWords, hashtags: [], shots: [] },
+    { clipIndex: args.clipIndex, illustrations: [], zooms, overlays: overlays.sort((a, b) => a.at - b.at), sfx: sfx.sort((a, b) => a.at - b.at), emphasisWords, hashtags: [], shots: [] },
     duration,
     settings,
   );
@@ -282,6 +291,8 @@ export interface ResolvedSfx extends Omit<Sfx, 'file'> {
 export interface ClipLayout {
   cam: { x0: number; y0: number; x1: number; y1: number } | null;
   gameplay: boolean;
+  /** Área do conteúdo que se mexe (react: o vídeo assistido), sem a facecam nem molduras. */
+  content?: { x0: number; y0: number; x1: number; y1: number } | null;
 }
 
 export interface ResolvedEdit {
@@ -291,6 +302,8 @@ export interface ResolvedEdit {
   zooms: Zoom[];
   overlays: ResolvedOverlay[];
   sfx: ResolvedSfx[];
+  /** Pedidos de imagem ilustrativa (buscadas pelo worker antes de renderizar). */
+  illustrations?: Illustration[];
   emphasisWords: string[];
   title?: string;
   description?: string;
@@ -347,6 +360,7 @@ export function resolveEdit(edit: ClipEdit, library: LibraryIndex, seed: string)
     zooms: edit.zooms,
     overlays,
     sfx,
+    illustrations: edit.illustrations ?? [],
     emphasisWords: edit.emphasisWords,
     title: edit.title,
     description: edit.description,

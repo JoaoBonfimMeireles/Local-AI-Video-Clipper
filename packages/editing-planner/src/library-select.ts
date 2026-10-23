@@ -95,7 +95,12 @@ function seeded(seed: string) {
  * cortes (fala, análise, categorias), mais alguns genéricos de reação e uma amostra variada.
  * Mantém a estrutura de categorias (pasta única aparece como "_geral").
  */
+/** Pasta (em data/images) das imagens que o app busca sozinho para ilustrar a fala. */
+export const ILLUSTRATION_CATEGORY = '_ilustracoes';
+
 export function shortlistLibrary(lib: LibraryIndex, texts: string[], limits = { memes: 70, images: 20, audio: 50 }, seed = 'x'): LibraryIndex {
+  // Ilustrações baixadas automaticamente não são memes: ficam fora do catálogo oferecido à IA
+  lib = { ...lib, images: lib.images.filter((c) => c.name !== ILLUSTRATION_CATEGORY) };
   const ctx = contextTokens(texts);
   const rnd = seeded(seed);
   const pickKind = (kind: keyof LibraryIndex, max: number) => {

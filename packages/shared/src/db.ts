@@ -7,6 +7,7 @@ import {
   type AppSettings,
   type Clip,
   type ClipStatus,
+  type Favorite,
   type Job,
   type JobLog,
   type JobResult,
@@ -69,6 +70,24 @@ CREATE TABLE IF NOT EXISTS presets (
   builtin INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS favorites (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  clip_index INTEGER NOT NULL,
+  video_name TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT,
+  hashtags_json TEXT,
+  dir TEXT NOT NULL,
+  video_path TEXT NOT NULL,
+  srt_path TEXT,
+  metadata_path TEXT NOT NULL,
+  duration REAL NOT NULL DEFAULT 0,
+  favorited_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_favorites_date ON favorites(favorited_at);
 
 CREATE TABLE IF NOT EXISTS app_settings (
   key TEXT PRIMARY KEY,
@@ -187,9 +206,20 @@ export function getJob(id: string): Job | null {
   return r ? toJob(r) : null;
 }
 
+/** Jobs do painel. Ajustes de corte ficam de fora: aparecem no próprio corte (listRevisions). */
 export function listJobs(limit = 50): Job[] {
-  const rows = getDb().prepare('SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?').all(limit) as JobRow[];
+  const rows = getDb()
+    .prepare(`SELECT * FROM jobs WHERE settings_json NOT LIKE '%"parentJobId"%' ORDER BY created_at DESC LIMIT ?`)
+    .all(limit) as JobRow[];
   return rows.map(toJob);
+}
+
+/** Ajustes pedidos nos cortes de um job, do mais recente para o mais antigo. */
+export function listRevisions(parentJobId: string, limit = 50): Job[] {
+  const rows = getDb()
+    .prepare(`SELECT * FROM jobs WHERE settings_json LIKE ? ORDER BY created_at DESC LIMIT ?`)
+    .all(`%"parentJobId":${JSON.stringify(parentJobId)}%`, limit) as JobRow[];
+  return rows.map(toJob).filter((j) => j.settings.revision?.parentJobId === parentJobId);
 }
 
 /** Pega atomicamente o próximo job pendente e o marca como 'processing'. */
@@ -365,6 +395,91 @@ export function updateClip(
 export function listClips(jobId: string): Clip[] {
   const rows = getDb().prepare('SELECT * FROM clips WHERE job_id = ? ORDER BY idx ASC').all(jobId) as ClipRow[];
   return rows.map(toClip);
+}
+
+// ---------------- Favoritos ----------------
+
+interface FavoriteRow {
+  id: string;
+  job_id: string;
+  clip_index: number;
+  video_name: string;
+  title: string;
+  description: string | null;
+  hashtags_json: string | null;
+  dir: string;
+  video_path: string;
+  srt_path: string | null;
+  metadata_path: string;
+  duration: number;
+  favorited_at: string;
+  updated_at: string;
+}
+
+function toFavorite(r: FavoriteRow): Favorite {
+  return {
+    id: r.id,
+    jobId: r.job_id,
+    clipIndex: r.clip_index,
+    videoName: r.video_name,
+    title: r.title,
+    description: r.description,
+    hashtags: r.hashtags_json ? JSON.parse(r.hashtags_json) : [],
+    dir: r.dir,
+    videoPath: r.video_path,
+    srtPath: r.srt_path,
+    metadataPath: r.metadata_path,
+    duration: r.duration,
+    favoritedAt: r.favorited_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+export function insertFavorite(f: Omit<Favorite, 'favoritedAt' | 'updatedAt'>): Favorite {
+  const ts = now();
+  getDb()
+    .prepare(
+      `INSERT INTO favorites (id, job_id, clip_index, video_name, title, description, hashtags_json, dir, video_path, srt_path, metadata_path, duration, favorited_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(f.id, f.jobId, f.clipIndex, f.videoName, f.title, f.description, JSON.stringify(f.hashtags), f.dir, f.videoPath, f.srtPath, f.metadataPath, f.duration, ts, ts);
+  return getFavorite(f.id)!;
+}
+
+export function getFavorite(id: string): Favorite | null {
+  const r = getDb().prepare('SELECT * FROM favorites WHERE id = ?').get(id) as FavoriteRow | undefined;
+  return r ? toFavorite(r) : null;
+}
+
+/** Favoritos, do mais recente para o mais antigo; `from`/`to` filtram pelo dia em que foram favoritados (AAAA-MM-DD). */
+export function listFavorites(filter: { from?: string; to?: string } = {}): Favorite[] {
+  const where: string[] = [];
+  const vals: string[] = [];
+  if (filter.from) where.push('favorited_at >= ?'), vals.push(new Date(`${filter.from}T00:00:00`).toISOString());
+  if (filter.to) where.push('favorited_at < ?'), vals.push(new Date(new Date(`${filter.to}T00:00:00`).getTime() + 86_400_000).toISOString());
+  const rows = getDb()
+    .prepare(`SELECT * FROM favorites ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY favorited_at DESC`)
+    .all(...vals) as FavoriteRow[];
+  return rows.map(toFavorite);
+}
+
+export function updateFavorite(id: string, patch: Partial<Pick<Favorite, 'title' | 'description' | 'hashtags' | 'videoPath' | 'srtPath' | 'metadataPath' | 'duration'>>): void {
+  const cur = getFavorite(id);
+  if (!cur) return;
+  const f = { ...cur, ...patch };
+  getDb()
+    .prepare('UPDATE favorites SET title = ?, description = ?, hashtags_json = ?, video_path = ?, srt_path = ?, metadata_path = ?, duration = ?, updated_at = ? WHERE id = ?')
+    .run(f.title, f.description, JSON.stringify(f.hashtags), f.videoPath, f.srtPath, f.metadataPath, f.duration, now(), id);
+}
+
+export function deleteFavorite(id: string): boolean {
+  return getDb().prepare('DELETE FROM favorites WHERE id = ?').run(id).changes > 0;
+}
+
+/** Ajustes pedidos em favoritos (mais recente primeiro). */
+export function listFavoriteRevisions(limit = 200): Job[] {
+  const rows = getDb().prepare(`SELECT * FROM jobs WHERE settings_json LIKE '%"favoriteId"%' ORDER BY created_at DESC LIMIT ?`).all(limit) as JobRow[];
+  return rows.map(toJob);
 }
 
 // ---------------- Presets ----------------

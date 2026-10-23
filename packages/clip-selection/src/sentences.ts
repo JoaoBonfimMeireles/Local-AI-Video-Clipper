@@ -64,12 +64,32 @@ export function snapToSentences(start: number, end: number, sentences: Sentence[
   const candidates = sentences.filter((x) => x.start >= s.start && x.end <= end + 2.5);
   let e = candidates[candidates.length - 1] ?? s;
   if (e.end < s.start) e = s;
+  // Nunca termina com a ideia pela metade ("...mas, aí" e o corte acaba): enquanto a última frase não
+  // fecha com pontuação final, ou acaba num conectivo, segue até ela se completar (até ~12s a mais)
+  const limit = e.end + 12;
+  while (!isComplete(e)) {
+    const next = sentences[sentences.indexOf(e) + 1];
+    if (!next || next.end > limit) break;
+    e = next;
+  }
   const startT = Math.max(0, s.start - 0.15);
   const endT = Math.min(videoDuration, e.end + Math.min(0.4, e.gapAfter * 0.6));
   return { start: round3(startT), end: round3(Math.max(endT, startT + 1)) };
 }
 
 const round3 = (n: number) => Math.round(n * 1000) / 1000;
+
+/** Palavras que anunciam continuação: a frase que termina nelas não fechou o pensamento. */
+const DANGLING = new Set(['mas', 'e', 'aí', 'ai', 'que', 'porque', 'pq', 'então', 'entao', 'tipo', 'se', 'quando', 'pra', 'para', 'de', 'do', 'da', 'o', 'a', 'um', 'uma', 'com', 'né', 'só', 'tipo,', 'mano', 'and', 'but', 'so', 'the', 'because']);
+
+/** A frase termina com pontuação final e não num conectivo solto. Sem pontuação nenhuma no texto, confia nas pausas. */
+function isComplete(x: Sentence): boolean {
+  const last = x.words[x.words.length - 1]?.word.trim() ?? x.text.trim().split(/\s+/).pop() ?? '';
+  const bare = last.toLowerCase().replace(/[^\p{L}]/gu, '');
+  if (DANGLING.has(bare)) return false;
+  if (/[,;:\-–]$/.test(last)) return false;
+  return TERMINAL.test(last) || x.gapAfter > 1.5;
+}
 
 /** Palavras de um corte com vários trechos, com tempos na linha do tempo do corte (trechos emendados). */
 export function wordsForSegments(transcript: Transcript, segments: { start: number; end: number }[]): TranscriptWord[] {

@@ -132,16 +132,31 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       lines.push(`Dialogue: 0,${assTime(start)},${assTime(end)},Main,,0,0,0,,${fadeIn}${body}`);
     }
   }
-  // Ranking do Top 5: "#3" grande + título do momento, alinhado à esquerda na parte de cima
-  for (const r of opts.rankCards ?? []) {
-    const label = escapeAss(r.label).toUpperCase().slice(0, 40);
-    const num = Math.round(fontSize * 1.9);
-    const sub = Math.round(fontSize * 0.8);
-    const x = Math.round(W * 0.05);
-    const y = Math.round(H * (vertical ? 0.16 : 0.12));
+  // Top 5: aviso de abertura + placar no canto superior esquerdo que vai acumulando os momentos já
+  // mostrados (#5, depois #5 e #4...). O momento atual fica em amarelo e maior; os anteriores, em branco.
+  const cards = [...(opts.rankCards ?? [])].sort((a, b) => a.at - b.at);
+  if (cards.length) {
+    const titleSize = Math.round(fontSize * 0.95);
     lines.push(
-      `Dialogue: 1,${assTime(r.at)},${assTime(r.end)},Main,,0,0,0,,{\\an7\\pos(${x},${y})\\fad(150,150)\\fs${num}\\c${HIGHLIGHT}\\bord${outline + 2}}#${r.rank}{\\fs${sub}\\c${WHITE}\\bord${outline}}\\N${label}`,
+      `Dialogue: 2,${assTime(0)},${assTime(Math.min(2.6, cards[0].end))},Main,,0,0,0,,{\\an8\\pos(${Math.round(W / 2)},${Math.round(H * (vertical ? 0.3 : 0.2))})\\fad(120,200)\\fs${titleSize}\\c${HIGHLIGHT}\\bord${outline + 2}}TOP ${cards.length}{\\c${WHITE}}\\NMELHORES MOMENTOS`,
     );
+    const rowSize = Math.round(fontSize * (vertical ? 0.52 : 0.45));
+    const rowGap = Math.round(rowSize * 1.35);
+    const x = Math.round(W * 0.04);
+    const y0 = Math.round(H * (vertical ? 0.05 : 0.06));
+    cards.forEach((cur, i) => {
+      // Cada trecho redesenha o placar inteiro até o início do próximo (o último fica até o fim)
+      const end = cards[i + 1]?.at ?? cur.end;
+      for (const shown of cards.slice(0, i + 1)) {
+        const label = escapeAss(shown.label || `Momento ${shown.rank}`).toUpperCase().slice(0, 28);
+        const now = shown === cur;
+        // Linha fixa por posição (#1 em cima, #5 embaixo): o placar cresce de baixo para cima
+        const y = y0 + (shown.rank - 1) * rowGap;
+        const style = now ? `\\fs${Math.round(rowSize * 1.15)}\\c${HIGHLIGHT}\\bord${outline + 1}` : `\\fs${rowSize}\\c${WHITE}\\bord${outline}\\alpha&H20&`;
+        const fade = now ? '\\fad(150,0)' : '';
+        lines.push(`Dialogue: 1,${assTime(cur.at)},${assTime(end)},Main,,0,0,0,,{\\an7\\pos(${x},${y})${fade}${style}}#${shown.rank} ${label}`);
+      }
+    });
   }
   return header + lines.join('\n') + '\n';
 }

@@ -26,7 +26,7 @@ import {
   type ClipCandidate,
   type ClipSegment,
 } from '@clipper/clip-selection';
-import { buildCatalog, detectFacecam, findAssetsByKeywords, heuristicEdit, shortlistLibrary, type ClipLayout, heuristicShots, normalizeEdit, refineShots, resolveEdit, type AssetMeta, type ClipEdit, type ResolvedEdit, type VideoKnowledge } from '@clipper/editing-planner';
+import { buildCatalog, detectFacecam, ILLUSTRATION_CATEGORY, findAssetsByKeywords, heuristicEdit, shortlistLibrary, type ClipLayout, heuristicShots, normalizeEdit, refineShots, resolveEdit, type AssetMeta, type ClipEdit, type ResolvedEdit, type VideoKnowledge } from '@clipper/editing-planner';
 import { creditLine, flattenWords, formatTimestamp, slugify, TWITCH_CATEGORIES, type AppSettings, type Job, type JobResult, type PipelineStep, type ProbeInfo, type Transcript, type TranscriptWord } from '@clipper/shared';
 import {
   addJobLog,
@@ -48,7 +48,10 @@ import {
   detectSceneChanges,
   detectSilences,
   analyzeAssets,
+  detectContentRegion,
   extractAudio,
+  planSoundPauses,
+  shiftForPauses,
   type AssetInfo,
   extractClipFramesFps,
   extractFrames,
@@ -64,6 +67,7 @@ import {
   type ExtractedFrame,
 } from '@clipper/video-processing';
 import { combineGuidelines, getStyleGuide } from './references';
+import { getIllustration } from './illustrations';
 
 // Faixa de progresso global de cada etapa
 const STEP_RANGE: Record<PipelineStep, [number, number]> = {
@@ -266,7 +270,8 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
   if (llm) {
     // A análise de live (Twitch) tem outro olhar e outras categorias: cache separado por modo
     // v2: análise de live mais densa (≈1 momento/30s) e com picos de volume — invalida análises antigas mais rasas
-    const kFile = `${cacheBase}.knowledge${s.mode === 'twitch' ? '-twitch-v2' : ''}.json`;
+    // Análise feita por modelo gratuito/limitado fica separada: com IA paga o vídeo é reanalisado com mais qualidade
+    const kFile = `${cacheBase}.knowledge${s.mode === 'twitch' ? '-twitch-v2' : ''}${llm.free ? '-free' : ''}.json`;
     if (fs.existsSync(kFile)) {
       knowledge = JSON.parse(fs.readFileSync(kFile, 'utf8')) as VideoKnowledge;
       log('info', `Conhecimento do vídeo reaproveitado do cache (${knowledge.moments.length} momentos) — sem reenviar transcrição e frames`);
@@ -319,17 +324,22 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       return acc;
     }, []);
     // Lives: liberdade para estender e fechar o raciocínio; compilação Top 5 tem 5 momentos completos
-    // Top 5: sem momentos repetidos e cada um com no máximo ~15s (terminando no fim de uma frase)
+    // Top N (3 a 5 momentos): sem repetidos e cada um com no máximo ~22s, com o contexto e terminando no fim do pensamento
     if (c.category === 'top5') {
       const unique: typeof segs = [];
       for (const sg of segs) {
         const dup = unique.some((u) => Math.min(u.end, sg.end) - Math.max(u.start, sg.start) > 0.5 * Math.min(u.end - u.start, sg.end - sg.start));
         if (!dup) unique.push(sg);
       }
-      if (unique.length < segs.length) log('info', `Top 5: ${segs.length - unique.length} momento(s) repetido(s) removido(s)`);
-      segs = unique.slice(0, 5).map((sg) => (sg.end - sg.start > 16 ? { ...snapToSentences(sg.start, sg.start + 15, sentences, info.duration), label: sg.label } : sg));
+      if (unique.length < segs.length) log('info', `Top: ${segs.length - unique.length} momento(s) repetido(s) removido(s)`);
+      // Menos de 3 momentos bons não é um "Top": descarta em vez de forçar
+      if (unique.length < 3) {
+        log('info', `"${c.title}" ficou com só ${unique.length} momento(s); compilação descartada`);
+        return { ...c, score: 0 };
+      }
+      segs = unique.slice(0, 5).map((sg) => (sg.end - sg.start > 24 ? { ...snapToSentences(sg.start, sg.start + 22, sentences, info.duration), label: sg.label } : sg));
     }
-    const maxDur = s.targetDuration * (c.category === 'top5' ? 2.5 : s.mode === 'twitch' ? 2.5 : 1.6);
+    const maxDur = c.category === 'top5' ? Math.max(90, s.targetDuration * 2.5) : s.targetDuration * (s.mode === 'twitch' ? 2.5 : 1.6);
     const total = () => segs.reduce((a, sg) => a + (sg.end - sg.start), 0);
     // Corte normal curto demais (momento solto de 7-10s) ganha contexto antes e depois, em frases inteiras.
     // Compilações (top5) são feitas de trechos curtos de propósito.
@@ -372,7 +382,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
     if (llm) {
       try {
         if (knowledge) {
-          candidates = await aiSelectFromKnowledge({ llm, knowledge, settings: s, app: appGuided, videoDuration: info.duration, signal, log: (l, m) => log(l, m) });
+          candidates = await aiSelectFromKnowledge({ llm, knowledge, transcript, settings: s, app: appGuided, videoDuration: info.duration, signal, log: (l, m) => log(l, m) });
         } else {
           log('info', `Enviando transcrição${app.sendFramesToAI && llm.supportsImages ? ' + frames' : ''} para ${llm.name}/${llm.model}`);
           candidates = await aiSelectCandidates({ llm, transcript, settings: s, app: appGuided, videoDuration: info.duration, frames, signal, log: (l, m) => log(l, m) });
@@ -390,7 +400,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       log('info', `Heurística gerou ${candidates.length} candidatos`);
     }
     fs.writeFileSync(path.join(tempDir, 'candidates.json'), JSON.stringify(candidates));
-    const picked = selectClips(candidates, { maxClips: s.maxClips, videoDuration: info.duration, targetDuration: s.targetDuration, minScore: llm ? 60 : 55, minClips: 5 });
+    const picked = selectClips(candidates, { maxClips: s.maxClips, videoDuration: info.duration, targetDuration: s.targetDuration, minScore: llm ? 70 : 55 });
     return picked.map((c, index) => ({ ...c, segments: segmentsOf(c), index }));
   });
   if (!selected.length) throw new Error('Nenhum corte selecionado.');
@@ -468,10 +478,16 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
     for (const c of selected) {
       if (s.mode !== 'twitch') continue;
       const v = visual.get(c.index)!;
-      const cam = verticalOut && s.twitchLayout !== 'full' ? detectFacecam(v.frames.map((f) => f.faces), 0.75) ?? (s.twitchLayout === 'split' ? splitLayout?.cam ?? null : null) : null;
-      const bigFace = v.frames.some((f) => f.faces.some((x) => x.w > 0.15));
-      layouts.set(c.index, { cam, gameplay: !cam && !bigFace });
-      log('info', `Corte ${c.index + 1}: layout ${cam ? 'facecam + jogo' : !bigFace ? 'jogo inteiro (gameplay)' : 'IRL (enquadramento por pessoa)'}`);
+      // Facecam presente em metade dos frames do corte já é fixa (o detector de rosto falha quando a pessoa
+      // se mexe, põe a mão no rosto, usa chapéu...); a da live inteira vale como reserva
+      const cam = verticalOut && s.twitchLayout !== 'full' ? detectFacecam(v.frames.map((f) => f.faces), 0.5) ?? splitLayout?.cam ?? null : null;
+      // Pessoa na câmera cheia (rosto grande, ou de corpo inteiro em boa parte do corte) → enquadramento por pessoa
+      const bigFace = v.frames.some((f) => f.faces.some((x) => x.w > 0.15)) || (!cam && v.frames.filter((f) => f.faces.some((x) => x.w > 0.04)).length >= v.frames.length * 0.4);
+      // Onde está o conteúdo que se mexe (react: o vídeo assistido) — sem a facecam e sem molduras paradas
+      const content = verticalOut && (cam || !bigFace) ? await detectContentRegion(v.frames.map((f) => f.path), cam, signal).catch(() => null) : null;
+      layouts.set(c.index, { cam, gameplay: !cam && !bigFace, content });
+      const pct = (b: { x0: number; x1: number; y0: number; y1: number }) => `x ${Math.round(b.x0 * 100)}–${Math.round(b.x1 * 100)}%, y ${Math.round(b.y0 * 100)}–${Math.round(b.y1 * 100)}%`;
+      log('info', `Corte ${c.index + 1}: layout ${cam ? `facecam (${pct(cam)}) em cima + ${content ? `conteúdo (${pct(content)})` : 'jogo'} embaixo` : !bigFace ? `jogo/conteúdo inteiro${content ? ` (${pct(content)})` : ''}` : 'IRL (enquadramento por pessoa)'}`);
     }
     const fixedLayout = (i: number) => !!(layouts.get(i)?.cam || layouts.get(i)?.gameplay);
     const facesFound = [...visual.values()].reduce((a, v) => a + v.frames.filter((f) => f.faces.length).length, 0);
@@ -514,6 +530,8 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
           assetMeta,
           splitLayout: selected.every((c) => fixedLayout(c.index)),
           catalog: catalog.text,
+          // Lives: nada de imagens/ilustrações por cima (só memes em vídeo e sons)
+          illustrations: app.useIllustrations && s.mode !== 'twitch',
           signal,
           log: (l, m) => log(l, m),
         });
@@ -564,6 +582,28 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       return resolved;
     });
   });
+  // Ilustrações: a IA pediu imagens do que é falado; o app busca em bancos livres e entra como imagem
+  const illustrationCredits = new Map<number, string[]>();
+  if (app.useIllustrations) {
+    for (const p of plan) {
+      for (const il of p.illustrations ?? []) {
+        signal.throwIfAborted();
+        // Já resolvida num processamento anterior (plano em cache)
+        if (p.overlays.some((o) => o.category === ILLUSTRATION_CATEGORY && Math.abs(o.at - il.at) < 0.05)) continue;
+        // Meme na tela nesse instante: a ilustração cede o lugar
+        if (p.overlays.some((o) => il.at < o.at + o.duration && o.at < il.at + il.duration)) continue;
+        const img = await getIllustration(il, { log: (l, m) => log(l, `Corte ${p.clipIndex + 1}: ${m}`), signal, workDir: path.join(tempDir, 'illustrations') }).catch((e) => {
+          if (signal.aborted) throw e;
+          log('warn', `Corte ${p.clipIndex + 1}: ilustração "${il.label || il.query}" falhou (${(e as Error).message})`);
+          return null;
+        });
+        if (!img) continue;
+        p.overlays.push({ type: 'image', category: ILLUSTRATION_CATEGORY, file: img.file, fileName: img.fileName, at: il.at, duration: il.duration, position: il.position, scale: 0.42, audioMode: 'video', reason: il.reason });
+        if (img.credit) illustrationCredits.set(p.clipIndex, [...(illustrationCredits.get(p.clipIndex) ?? []), `${il.label || il.query}: ${img.credit}`]);
+      }
+      p.overlays.sort((a, b) => a.at - b.at);
+    }
+  }
   // Memes escolhidos fora da pré-seleção (plano heurístico) também precisam de duração/áudio/fundo verde
   await analyzeRefs(plan.flatMap((p) => p.overlays.map((o) => ({ kind: o.type === 'image' ? ('images' as const) : ('memes' as const), cat: o.category, file: o.fileName }))));
   for (const p of plan) {
@@ -573,6 +613,9 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
     // Créditos do vídeo original (Creative Commons) sempre ao fim da descrição
     const credit = creditLine(s);
     if (credit && !p.description?.includes(credit)) p.description = [p.description, credit].filter(Boolean).join('\n\n');
+    // Licenças CC BY / BY-SA das ilustrações pedem crédito
+    const imgCredits = illustrationCredits.get(p.clipIndex);
+    if (imgCredits?.length) p.description = [p.description, `Imagens: ${[...new Set(imgCredits)].join('; ')}`].filter(Boolean).join('\n\n');
     if (p.title || p.description || p.hashtags.length) {
       const c = selected.find((x) => x.index === p.clipIndex)!;
       if (p.title) c.title = p.title;
@@ -704,6 +747,12 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         await prepareClipSource({ input: job.inputPath, segments: c.segments, source: info, subtitleRegion: inpaintRegion, output: input, workDir, signal, onProgress: (p) => tick(p * 0.5) });
       }
 
+      const pauses = planSoundPauses(
+        edit.sfx.map((x) => ({ file: x.file, at: x.at, volume: x.volume, duration: x.duration ?? assetInfo.get(x.file)?.duration })),
+        words,
+        duration,
+      );
+      if (pauses.length) log('info', `Corte ${c.index + 1}: ${pauses.length} som(ns) com o vídeo pausado (${pauses.map((p) => `${p.at.toFixed(1)}s`).join(', ')})`);
       await renderClip({
         input,
         start,
@@ -715,6 +764,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         shots: edit.shots,
         cleanArea,
         split: edit.layout?.cam ? { cam: edit.layout.cam } : null,
+        content: edit.layout?.content ?? null,
         zooms: edit.zooms,
         overlays: edit.overlays.map((o) => {
           const inf = assetInfo.get(o.file);
@@ -722,10 +772,9 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
           const dur = inf && inf.duration > 0 ? Math.min(Math.max(o.duration, Math.min(inf.duration, 6)), inf.duration) : o.duration;
           return { file: o.file, at: o.at, duration: dur, position: o.position, scale: o.scale, hasAudio: inf?.hasAudio ?? assetAudio.get(o.file), volume: 0.9, greenScreen: inf?.greenScreen, keyColor: inf?.keyColor, audioMode: o.audioMode };
         }),
-        sfx: edit.sfx.map((x) => {
-          const len = assetInfo.get(x.file)?.duration ?? 0;
-          return { file: x.file, at: x.at, volume: x.volume, duration: x.duration ?? (len > 0 ? Math.min(len, 5) : 5) };
-        }),
+        // Efeitos sonoros viram PAUSAS: o vídeo congela, o som toca sozinho e o vídeo continua (nunca por cima da fala)
+        pauses,
+        sfx: [],
         assContent: ass,
         output: `${base}.mp4`,
         workDir,
@@ -735,16 +784,17 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         onProgress: (p) => tick(input === job.inputPath ? p * 0.95 : 0.5 + p * 0.45),
       });
       await extractThumbnail(`${base}.mp4`, `${base}.jpg`, Math.min(1.5, duration / 2)).catch(() => undefined);
+      const pausedTotal = pauses.reduce((a, p) => a + p.duration, 0);
 
       let srtPath: string | null = null;
       const srtFiles: Record<string, string> = {};
       if (s.exportSrt) {
         srtPath = `${base}.srt`;
-        fs.writeFileSync(srtPath, buildSrt(words), 'utf8');
+        fs.writeFileSync(srtPath, buildSrt(shiftForPauses(words, pauses)), 'utf8');
         srtFiles[transcript.language] = path.basename(srtPath);
         if (translatedWords) {
           const tp = `${base}.${s.translateTo}.srt`;
-          fs.writeFileSync(tp, buildSrt(translatedWords), 'utf8');
+          fs.writeFileSync(tp, buildSrt(shiftForPauses(translatedWords, pauses)), 'utf8');
           srtFiles[s.translateTo] = path.basename(tp);
         }
       }
@@ -759,7 +809,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         description: edit.description ?? null,
         hashtags: edit.hashtags,
         source: { file: path.basename(job.inputPath), start: c.start, end: c.end, segments: c.segments },
-        duration: Number(duration.toFixed(3)),
+        duration: Number((duration + pausedTotal).toFixed(3)),
         format: s.format,
         resolution: `${canvas.width}x${canvas.height}`,
         intensity: s.intensity,
@@ -877,11 +927,11 @@ export function transcriptCachePath(input: string, model: string, language: stri
   return `${videoCacheBase(input, model, language)}.json`;
 }
 
-/** Top 5: "#5 ... #1" durante cada trecho (contagem regressiva, o melhor por último). */
+/** Top 5: um card por trecho (contagem regressiva, o melhor por último); o placar acumula na legenda. */
 export function rankCardsFor(segments: ClipSegment[]): { at: number; end: number; rank: number; label: string }[] {
   let off = 0;
   return segments.map((sg, i) => {
-    const card = { at: off + 0.1, end: off + Math.min(sg.end - sg.start, 4.5), rank: segments.length - i, label: sg.label ?? '' };
+    const card = { at: off, end: off + sg.end - sg.start, rank: segments.length - i, label: sg.label ?? '' };
     off += sg.end - sg.start;
     return card;
   });

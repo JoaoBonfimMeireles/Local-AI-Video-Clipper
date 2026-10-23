@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { CheckCircle2, Cpu, KeyRound, Loader2, PenLine, Plug, RefreshCw, Save, Sparkles, TriangleAlert, XCircle } from 'lucide-react';
+import { CheckCircle2, Cpu, ImageIcon, KeyRound, Loader2, PenLine, Plug, RefreshCw, Save, Sparkles, TriangleAlert, XCircle } from 'lucide-react';
 import { DEFAULT_APP_SETTINGS, LANGUAGES, type AiProviderName, type AppSettings, type GeminiPlan } from '@clipper/shared';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -11,7 +11,10 @@ import { Switch } from '@/components/ui/switch';
 import { api } from '@/lib/client';
 import { cn } from '@/lib/utils';
 
-type Secrets = Record<'GEMINI_API_KEY' | 'ANTHROPIC_API_KEY', boolean>;
+type SecretName = 'GEMINI_API_KEY' | 'ANTHROPIC_API_KEY' | 'PIXABAY_API_KEY' | 'TMDB_API_KEY';
+type Secrets = Record<SecretName, boolean>;
+const NO_SECRETS: Secrets = { GEMINI_API_KEY: false, ANTHROPIC_API_KEY: false, PIXABAY_API_KEY: false, TMDB_API_KEY: false };
+const EMPTY_KEYS: Record<SecretName, string> = { GEMINI_API_KEY: '', ANTHROPIC_API_KEY: '', PIXABAY_API_KEY: '', TMDB_API_KEY: '' };
 interface EnvCheck {
   name: string;
   ok: boolean;
@@ -31,8 +34,8 @@ const WHISPER_MODELS = ['tiny', 'base', 'small', 'medium', 'large-v3-turbo', 'la
 
 export function SettingsForm() {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
-  const [secrets, setSecrets] = useState<Secrets>({ GEMINI_API_KEY: false, ANTHROPIC_API_KEY: false });
-  const [keys, setKeys] = useState({ GEMINI_API_KEY: '', ANTHROPIC_API_KEY: '' });
+  const [secrets, setSecrets] = useState<Secrets>(NO_SECRETS);
+  const [keys, setKeys] = useState(EMPTY_KEYS);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -69,7 +72,7 @@ export function SettingsForm() {
       });
       setSettings(r.settings);
       setSecrets(r.secrets);
-      setKeys({ GEMINI_API_KEY: '', ANTHROPIC_API_KEY: '' });
+      setKeys(EMPTY_KEYS);
       setMsg({ ok: true, text: 'Configurações salvas. Valem a partir do próximo job.' });
     } catch (e) {
       setMsg({ ok: false, text: (e as Error).message });
@@ -132,9 +135,15 @@ export function SettingsForm() {
             )}
             {settings.aiProvider === 'anthropic' && (
               <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="Modelo Claude">
-                  <Input value={settings.anthropicModel} onChange={(e) => set('anthropicModel', e.target.value)} />
+                <Field label="Modelo que escolhe os cortes (o mais capaz)">
+                  <Input value={settings.anthropicSelectModel} onChange={(e) => set('anthropicSelectModel', e.target.value)} placeholder="claude-opus-5-5" />
                 </Field>
+                <Field label="Modelo de edição, títulos e tradução">
+                  <Input value={settings.anthropicModel} onChange={(e) => set('anthropicModel', e.target.value)} placeholder="claude-sonnet-5-5" />
+                </Field>
+                <p className="text-xs text-muted-foreground sm:col-span-2">
+                  Opus 5.5 (US$ 4 / 20 por 1M tokens) pensa a seleção com calma; Sonnet 5.5 (US$ 2 / 10) faz o resto. Um vídeo de 10–30 min costuma custar entre US$ 0,20 e 1,00 (o custo estimado aparece no log de cada job).
+                </p>
                 <KeyField name="ANTHROPIC_API_KEY" configured={secrets.ANTHROPIC_API_KEY} value={keys.ANTHROPIC_API_KEY} onChange={(v) => setKeys((k) => ({ ...k, ANTHROPIC_API_KEY: v }))} onRemove={() => removeKey('ANTHROPIC_API_KEY')} />
               </div>
             )}
@@ -207,6 +216,31 @@ export function SettingsForm() {
         </Card>
 
         <ReferencesCard enabled={settings.useReferences} onToggle={(v) => set('useReferences', v)} />
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <ImageIcon className="size-4 text-primary" /> Ilustrações automáticas
+            </CardTitle>
+            <CardDescription>
+              Quando a pessoa fala de algo concreto (um avião, um filme, um jogador), a IA pede uma imagem e o app busca em bancos de licença livre: Wikimedia Commons e
+              Openverse (sem chave), Pixabay e TMDB (filmes e séries, chave grátis). Fotos sem fundo transparente viram um cartão com borda.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <label className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5">
+              <span className="text-sm">Ilustrar o que é falado</span>
+              <Switch checked={settings.useIllustrations} onCheckedChange={(v) => set('useIllustrations', v)} />
+            </label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <KeyField name="PIXABAY_API_KEY" configured={secrets.PIXABAY_API_KEY} value={keys.PIXABAY_API_KEY} onChange={(v) => setKeys((k) => ({ ...k, PIXABAY_API_KEY: v }))} onRemove={() => removeKey('PIXABAY_API_KEY')} />
+              <KeyField name="TMDB_API_KEY" configured={secrets.TMDB_API_KEY} value={keys.TMDB_API_KEY} onChange={(v) => setKeys((k) => ({ ...k, TMDB_API_KEY: v }))} onRemove={() => removeKey('TMDB_API_KEY')} />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Chaves grátis: pixabay.com/api/docs e themoviedb.org/settings/api. Imagens com licença que pede crédito entram no fim da descrição do post.
+            </p>
+          </CardContent>
+        </Card>
 
         <Card>
           <CardHeader>

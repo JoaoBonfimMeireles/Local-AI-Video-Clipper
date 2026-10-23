@@ -2,6 +2,9 @@ import { z } from 'zod';
 
 /** Nome de categoria (pasta): sem barras, pontos ou caracteres de caminho. */
 export const SafeName = z.string().trim().regex(/^[\p{L}\p{N}_\- ]{1,64}$/u, 'nome de categoria inválido');
+
+/** Texto livre da IA: corta o excesso em vez de recusar (evita repetir uma chamada paga só por ficar longo). */
+const cappedText = (max: number, min = 0) => z.string().trim().min(min).transform((s) => s.slice(0, max));
 /** Nome de arquivo simples: sem separadores de pasta nem "..". Ainda assim só é aceito se existir no índice da biblioteca. */
 export const SafeFileName = z
   .string()
@@ -19,7 +22,7 @@ export const SegmentSchema = z
     start: Seconds,
     end: Seconds,
     /** Título curto do momento (usado nos cartões numerados do Top 5). */
-    label: z.string().trim().max(60).nullish(),
+    label: cappedText(60).nullish(),
   })
   .refine((s) => s.end > s.start + 1, { message: 'cada trecho precisa ter end > start (mín. 1s)' });
 
@@ -35,9 +38,9 @@ export const ClipCandidateSchema = z
     /** Modo Twitch: categoria do corte (funny, scary, top5...). */
     category: z.string().trim().max(30).optional(),
     score: z.coerce.number().finite().min(0).max(100),
-    title: z.string().trim().min(1).max(140),
-    reason: z.string().trim().max(800).default(''),
-    hook: z.string().trim().max(300).optional(),
+    title: cappedText(140, 1),
+    reason: cappedText(800).default(''),
+    hook: cappedText(300).optional(),
   })
   .refine((c) => (c.segments?.length ?? 0) > 0 || (c.start !== undefined && c.end !== undefined && c.end > c.start + 2), {
     message: 'informe segments ou start/end (end > start)',
@@ -84,7 +87,7 @@ export const OverlaySchema = z.object({
    */
   audioMode: z.enum(['meme', 'video', 'both']).default('both'),
   /** Por que este meme combina com o momento (validação da própria IA). */
-  reason: z.string().trim().max(300).optional(),
+  reason: cappedText(300).optional(),
 });
 
 export const SfxSchema = z.object({
@@ -95,7 +98,7 @@ export const SfxSchema = z.object({
   volume: z.coerce.number().finite().min(0).max(2).default(0.8),
   /** Quanto do som tocar (s). Sons longos são cortados com fade para não virarem trilha de fundo. */
   duration: z.coerce.number().finite().min(0.3).max(10).optional(),
-  reason: z.string().trim().max(300).optional(),
+  reason: cappedText(300).optional(),
 });
 
 /**
@@ -110,26 +113,44 @@ export const ShotSchema = z.object({
   focusX: z.coerce.number().finite().min(0).max(1).default(0.5),
   focusY: z.coerce.number().finite().min(0).max(1).default(0.45),
   scale: z.coerce.number().finite().min(1).max(2.5).default(1),
-  reason: z.string().trim().max(200).optional(),
+  reason: cappedText(200).optional(),
   /** Preenchido localmente (detecção de rosto), não pela IA: caixa do rosto enquadrado. */
   subject: z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() }).nullable().optional(),
   /** Preenchido localmente: faixa horizontal (0-1) que contém todas as pessoas, para planos abertos. */
   group: z.object({ x0: z.number(), x1: z.number() }).nullable().optional(),
 });
 
+/**
+ * Imagem ilustrativa do que está sendo falado (tempos relativos ao corte). A IA só descreve a busca;
+ * o app procura a imagem em bancos de licença livre e trata o visual (recorte/cartão).
+ */
+export const IllustrationSchema = z.object({
+  at: Seconds,
+  duration: z.coerce.number().finite().min(1).max(6).default(2.5),
+  /** Termos de busca em inglês, curtos e concretos ("commercial airplane", "Interstellar"). */
+  query: cappedText(80, 2),
+  /** Nome em português, para log e créditos. */
+  label: cappedText(60).default(''),
+  kind: z.enum(['object', 'animal', 'place', 'person', 'brand', 'movie', 'series', 'game', 'food', 'other']).catch('other'),
+  position: OverlayPositionSchema.default('top'),
+  reason: cappedText(200).optional(),
+});
+export type Illustration = z.infer<typeof IllustrationSchema>;
+
 export const ClipEditSchema = z.object({
   clipIndex: z.coerce.number().int().min(0),
+  illustrations: z.array(IllustrationSchema).transform((a) => a.slice(0, 8)).default([]),
   shots: z.array(ShotSchema).max(80).default([]),
   zooms: z.array(ZoomSchema).max(80).default([]),
   overlays: z.array(OverlaySchema).max(30).default([]),
   sfx: z.array(SfxSchema).max(40).default([]),
-  emphasisWords: z.array(z.string().trim().min(1).max(40)).max(60).default([]),
+  emphasisWords: z.array(cappedText(40, 1)).transform((a) => a.slice(0, 60)).default([]),
   /** Título final para postagem (o modelo de edição pode melhorar o da seleção). */
-  title: z.string().trim().min(1).max(120).optional(),
+  title: cappedText(120, 1).optional(),
   /** Legenda/descrição para o post. */
-  description: z.string().trim().max(1500).optional(),
+  description: cappedText(1500).optional(),
   hashtags: z
-    .array(z.string().trim().min(1).max(60))
+    .array(cappedText(60, 1))
     .max(20)
     .default([])
     .transform((tags) => [...new Set(tags.map((t) => '#' + t.replace(/^#+/, '').replace(/\s+/g, '')))].filter((t) => t.length > 1)),
@@ -145,26 +166,26 @@ export const EditPlanSchema = z.preprocess(
 // ---------- Conhecimento do vídeo (cacheado por vídeo, independente da edição) ----------
 
 export const VideoKnowledgeSchema = z.object({
-  summary: z.string().trim().max(3000),
-  format: z.string().trim().max(300).default(''),
+  summary: cappedText(3000),
+  format: cappedText(300).default(''),
   speakers: z
-    .array(z.object({ id: z.string().trim().max(20), description: z.string().trim().max(300), position: z.string().trim().max(100).default('') }))
+    .array(z.object({ id: cappedText(20), description: cappedText(300), position: cappedText(100).default('') }))
     .max(12)
     .default([]),
-  topics: z.array(z.string().trim().max(80)).max(30).default([]),
+  topics: z.array(cappedText(80)).transform((a) => a.slice(0, 30)).default([]),
   moments: z
     .array(
       z.object({
         start: Seconds,
         end: Seconds,
         type: z.string().trim().max(30).default('other'),
-        description: z.string().trim().max(500),
+        description: cappedText(500),
         // A IA às vezes manda null nos campos opcionais: aceitar evita uma chamada extra de correção
-        quote: z.string().trim().max(400).nullish(),
+        quote: cappedText(400).nullish(),
         speaker: z.string().trim().max(20).nullish(),
-        topic: z.string().trim().max(80).nullish(),
+        topic: cappedText(80).nullish(),
         strength: z.coerce.number().finite().min(0).max(100).default(50),
-        visual: z.string().trim().max(300).nullish(),
+        visual: cappedText(300).nullish(),
       }),
     )
     .max(200),
@@ -236,25 +257,25 @@ export const RevisionSchema = ClipEditSchema.omit({ clipIndex: true }).extend({
   /** Só quando o pedido muda o começo/fim/trechos do corte (tempos ABSOLUTOS do vídeo original). */
   segments: z.array(SegmentSchema).min(1).max(8).nullish(),
   /** O que foi mudado, em uma frase (vai para o log). */
-  changes: z.string().trim().max(400).optional(),
+  changes: cappedText(400).optional(),
 });
 export type Revision = z.infer<typeof RevisionSchema>;
 
 // ---------- Clipes de referência (estilo aprendido de cortes virais) ----------
 
 export const ReferenceStyleSchema = z.object({
-  niche: z.string().trim().max(200).default(''),
-  hook: z.string().trim().max(600),
-  structure: z.string().trim().max(800),
-  pacing: z.string().trim().max(600),
-  humor: z.string().trim().max(600).default(''),
-  editing: z.string().trim().max(800),
-  captions: z.string().trim().max(400).default(''),
-  ending: z.string().trim().max(400).default(''),
-  tips: z.array(z.string().trim().max(240)).max(8).default([]),
+  niche: cappedText(200).default(''),
+  hook: cappedText(600),
+  structure: cappedText(800),
+  pacing: cappedText(600),
+  humor: cappedText(600).default(''),
+  editing: cappedText(800),
+  captions: cappedText(400).default(''),
+  ending: cappedText(400).default(''),
+  tips: z.array(cappedText(240)).transform((t) => t.slice(0, 8)).default([]),
 });
 export type ReferenceStyle = z.infer<typeof ReferenceStyleSchema>;
 
 export const StyleGuideSchema = z.object({
-  guide: z.string().trim().min(20).max(4000),
+  guide: cappedText(4000, 20),
 });

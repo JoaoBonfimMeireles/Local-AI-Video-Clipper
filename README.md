@@ -76,7 +76,7 @@ Em **Configurações** (ou `.env.local` na raiz, veja `.env.example`):
 | --- | --- |
 | Gemini (padrão) | `GEMINI_API_KEY`. Planos abaixo. Multimodal (transcrição + frames). |
 | Heurístico | Offline, sem chave. Seleção e plano por regras. Não traduz nem gera hashtags. |
-| Anthropic | `ANTHROPIC_API_KEY`, modelo padrão `claude-sonnet-5-5`. Multimodal. |
+| Anthropic (recomendado para qualidade) | `ANTHROPIC_API_KEY`. **Claude Opus 5.5** escolhe os cortes (raciocínio alto, transcrição completa junto) e **Claude Sonnet 5.5** faz edição, títulos e tradução. Streaming, novas tentativas automáticas e custo estimado no log. |
 | Ollama | `http://127.0.0.1:11434`, modelo padrão `llama3`. Transcrições longas são divididas em blocos. |
 
 ### Planos do Gemini
@@ -121,15 +121,35 @@ No formulário, escolha **Live da Twitch**. Muda o olhar da IA e a edição:
 
 - **Análise como espectador de live:** mapeia a live inteira em momentos com tipo e **assunto**. Os cortes são
   separados por categoria (mais engraçados, tensos/assustadores, interação com o chat, zoeira entre pessoas, falas
-  marcantes, jogadas) e há um corte **Top 5 da live** (compilação dos 5 melhores momentos).
+  marcantes, jogadas, reações) e pode haver um corte **Top da live** (3 a 5 melhores momentos, cada um com o contexto que levou a ele;
+  se não houver 3 momentos bons, não é feito).
+- **Quantidade pela qualidade:** a IA faz quantos cortes o material merece (nota ≥ 70) — vídeo curto ou fraco gera 1–3,
+  live longa e rica pode gerar dezenas. Ela usa um repertório de formatos virais (contexto → reação, storytime, fail,
+  treta, plot twist, pergunta do chat…) e cada corte precisa de gancho, contexto e desfecho.
+- **Sem frase pela metade:** se o corte acabaria num "mas", "aí", "que…" ou sem pontuação final, ele é estendido até o
+  pensamento fechar.
 - **Recorte por assunto:** até 8 trechos por corte. Se o streamer fala de "banana", desvia para "maçã" e volta, o corte
   junta só os trechos de "banana". Tempo morto é cortado.
 - **Layout facecam + jogo:** se houver facecam fixa num canto (detectada automaticamente), o vertical vira câmera em
-  cima e jogo embaixo, com a legenda na emenda. Para IRL/sem facecam, usa o enquadramento por pessoas.
+  cima e jogo embaixo, com a legenda na emenda. Em **react**, a área do vídeo assistido é detectada pelo movimento e vai
+  inteira embaixo, sem nenhum pedaço da câmera. Para IRL/sem facecam, usa o enquadramento por pessoas.
 - **Memes green screen** (ex.: Green Screen Memes): vídeos com fundo verde são detectados e recortados (chroma key) por
   cima do vídeo; memes com áudio entram na mixagem e o som da live abaixa enquanto tocam. Sons (ex.: myinstants) vão em
   `data/audio/<categoria>`. A IA recebe duração, áudio e fundo verde de cada arquivo da biblioteca.
 - O cache de conhecimento do modo Twitch é separado do modo YouTube (análises diferentes do mesmo arquivo).
+
+### Favoritos
+
+Clique na **estrela** de um corte pronto para guardá-lo na aba **Favoritos**. O favorito é uma **cópia independente**
+(em `data/favorites/<id>`: vídeo, capa, SRT, metadados e transcrição), então reprocessar ou excluir o job não o afeta.
+Cada favorito mostra a data e a hora em que foi favoritado, a descrição/hashtags, os memes e sons usados, e aceita
+**pedido de ajuste** direto nele (a nova versão fica na pasta do favorito). Dá para filtrar por período e buscar por texto.
+
+### Sons sem atropelar a fala
+
+Efeitos sonoros não tocam mais por cima da voz: no ponto do som (sempre no fim de uma palavra) o vídeo **pausa**
+(quadro congelado), o som toca sozinho e o vídeo continua. No máximo 3 pausas por corte; o SRT acompanha o novo tempo.
+Memes ficam sempre inteiros dentro do quadro (os de baixo encostam a base na borda, nunca aparecem pela metade).
 
 ### Clipes de referência (guia de estilo)
 

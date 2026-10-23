@@ -4,9 +4,33 @@ import { formatTimestamp } from '@clipper/shared';
 
 export const SELECTION_SYSTEM = `Você é um editor sênior de vídeos virais (TikTok, Reels, Shorts).
 Sua tarefa é encontrar os trechos de um vídeo longo com maior potencial de retenção e compartilhamento.
-Critérios: gancho forte nos primeiros 3 segundos, história completa (começo-meio-fim), emoção (humor, surpresa, polêmica),
-informação valiosa ou contraintuitiva, frases de impacto. Nunca corte uma frase ao meio.
+O que faz um corte viralizar é RETENÇÃO: a pessoa assiste até o fim e reassiste. Para isso cada corte precisa de:
+1) GANCHO nos primeiros 1-3s (a frase/imagem mais intrigante, uma pergunta, o começo do absurdo);
+2) CONTEXTO suficiente para quem nunca viu o vídeo entender O QUE está acontecendo e POR QUE aquilo chegou ali (o que
+   levou à piada, à briga, ao comentário) — um corte que parece "o meio de uma conversa" é um corte ruim;
+3) DESFECHO: a reação, a punchline, a conclusão. Termine logo depois do desfecho, nunca antes.
+Nunca corte uma frase ou ideia ao meio ("mas, aí..." e acaba). Seja crítico: qualidade importa mais que quantidade.
 Responda SOMENTE com JSON válido, sem comentários.`;
+
+/** Formatos de shorts que costumam performar bem — a IA usa como repertório, não como lista obrigatória. */
+export const VIRAL_FORMATS = `Repertório de formatos que funcionam em shorts (use qualquer um que caiba no material, ou outro que você reconheça):
+- contexto → reação: mostra rápido o que aconteceu e depois a reação exagerada/genuína
+- storytime: a pessoa conta uma história com começo, virada e final engraçado/chocante
+- pergunta/comentário do chat → resposta absurda ou certeira
+- fail/vexame e "deu ruim": o plano que dá errado, com a consequência
+- treta/discussão/roast: provocação, resposta, quem venceu
+- plot twist: começa de um jeito e termina de outro inesperado
+- frase que vira meme / fala fora de contexto (curta, mas compreensível)
+- raiva/rage, desespero, susto genuíno
+- momento wholesome/emocionante
+- opinião forte ou polêmica com argumento completo
+- imitação, personagem, bordão, piada interna explicada
+- jogada absurda, clutch, conquista, recorde`;
+
+/** Regras de quantidade e qualidade (o vídeo decide quantos cortes, não uma meta). */
+const QUALITY_QTY = `Quantidade: VOCÊ decide pelo material. Inclua só momentos que realmente seguram alguém até o fim (nota >= 70).
+Vídeo curto ou fraco → poucos cortes (1, 2 ou 3 está ótimo); vídeo longo e rico → quantos tiverem qualidade (podem ser dezenas).
+Nunca invente corte para "completar número". Notas realistas: 90+ só para o que você postaria com certeza.`;
 
 export const PLAN_SYSTEM = `Você é um editor de vídeos curtos exigente, que pensa como um diretor de câmera.
 Cada decisão precisa ter motivo: enquadre quem está falando, mostre a reação do outro quando ela importa,
@@ -91,7 +115,7 @@ ${moments}`;
 const TWITCH_CATEGORY_RULES: Record<string, string> = {
   funny: 'funny — os momentos MAIS engraçados (risada genuína, situação absurda, piada que funcionou)',
   scary: 'scary — sustos e tensão (jumpscare, grito, momento de pânico, quase morte no jogo)',
-  top5: 'top5 — UM corte compilação "Top 5 melhores momentos": exatamente 5 trechos (5-15s cada, cada um com começo e desfecho), em contagem regressiva (o 5º melhor primeiro, o MELHOR por último). Cada trecho TEM "label": título curto do momento (máx. 30 caracteres), que aparece na tela ao lado do número',
+  top5: 'top5 — no máximo UM corte compilação "Top melhores momentos": de 3 a 5 trechos (só os que forem MUITO bons; se não houver 3 bons, NÃO faça), em contagem regressiva (o melhor por último). Cada trecho de 8-22s precisa ser compreensível sozinho: inclua o que levou ao momento e o desfecho, frases completas. Cada trecho TEM "label": título curto do momento (máx. 30 caracteres), que aparece na tela ao lado do número',
   reaction: 'reaction — o streamer reagindo a algo que VIU (no jogo, no chat, num vídeo, um fail de outro jogador) e achou engraçado/absurdo',
   chat: 'chat — interação com viewers (lendo/respondendo o chat de forma engraçada, donate, raid, pedido inusitado)',
   roast: 'roast — uma pessoa zoando a outra, provocações, alguém sendo humilhado de forma engraçada',
@@ -99,31 +123,39 @@ const TWITCH_CATEGORY_RULES: Record<string, string> = {
   highlights: 'highlights — jogadas: clutch, fail épico, momento de skill, final de partida',
 };
 
-function buildTwitchSelectionPrompt(args: { knowledge: VideoKnowledge; settings: JobSettings; videoDuration: number }): string {
+function buildTwitchSelectionPrompt(args: { knowledge: VideoKnowledge; settings: JobSettings; videoDuration: number; transcriptText?: string }): string {
   const { settings: s } = args;
   const cats = (s.twitchCategories.length ? s.twitchCategories : Object.keys(TWITCH_CATEGORY_RULES)).map((c) => `- ${TWITCH_CATEGORY_RULES[c]}`).join('\n');
   const qty =
     s.maxClips === 'auto'
-      ? 'Quantidade: proponha de 8 a 12 cortes no total (fora o top5), espalhados pela live e entre as categorias; dê notas realistas (os melhores serão escolhidos, mínimo de 5).'
-      : `Quantidade: até ${s.maxClips} cortes no total, distribuídos entre as categorias.`;
+      ? QUALITY_QTY
+      : `Quantidade: até ${s.maxClips} cortes no total, só os de qualidade.`;
   return `Duração total da live: ${args.videoDuration.toFixed(0)}s.
 Duração desejada por corte: ~${s.targetDuration}s (flexível: entre ${Math.round(s.targetDuration * 0.5)}s e ${Math.round(s.targetDuration * 1.5)}s, somando os trechos).
 ${qty}
 
-Categorias pedidas (cada corte pertence a UMA):
+Categorias (cada corte pertence a UMA; o ângulo do corte pode ser qualquer formato do repertório abaixo):
 ${cats}
+
+${VIRAL_FORMATS}
 
 Análise da live:
 ${knowledgeToText(args.knowledge)}
-
+${args.transcriptText ? `
+Transcrição completa (use para achar onde cada ideia COMEÇA e TERMINA de verdade):
+${args.transcriptText}
+` : ''}
 Como um editor de clipes de Twitch:
 - Cada corte tem de 1 a 8 trechos ("segments"), na ordem de exibição. Se uma história foi interrompida por outro assunto
   e depois retomada (banana → maçã → banana), monte o corte só com os trechos do assunto principal, pulando o desvio.
 - Corte o tempo morto: silêncio, carregamento, o streamer lendo algo irrelevante. Comece no segundo que a coisa acontece
   (ou 2-4s antes, para dar contexto do susto/piada) e termine logo após a reação.
-- O corte precisa funcionar para quem não viu a live: se precisar de contexto, inclua um trecho curto que explica.
+- O corte precisa funcionar para quem não viu a live: comece onde a situação COMEÇA (o que levou àquilo: a pergunta,
+  o comentário do chat, o vídeo que ele está reagindo, a provocação) — não no meio. Se o contexto está longe, junte um
+  trecho curto que explica antes do momento.
 - NUNCA termine no meio de um raciocínio, piada ou história: se a pessoa ainda está concluindo, estenda o corte até
-  o desfecho (pode passar bem da duração desejada). Começo e fim em frases completas.
+  o desfecho (pode passar bem da duração desejada). Começo e fim em frases completas, nunca numa palavra solta.
+- React (streamer assistindo vídeo): o corte precisa mostrar o que ele viu (o trecho do vídeo) E a reação dele.
 - Pense como editor de clipes: prefira os trechos mais agitados (picos de volume, muita ação), o comentário certeiro,
   a sacada, a zoeira com o chat. Um "corte simples" de 10-20s com uma fala ótima também vale.
 
@@ -134,20 +166,25 @@ Regras: tempos alinhados ao início/fim de frases (use os tempos dos momentos); 
 (exceto o top5, que pode reaproveitar os melhores momentos); score de 0 a 100.`;
 }
 
-export function buildSelectionFromKnowledgePrompt(args: { knowledge: VideoKnowledge; settings: JobSettings; videoDuration: number }): string {
+export function buildSelectionFromKnowledgePrompt(args: { knowledge: VideoKnowledge; settings: JobSettings; videoDuration: number; transcriptText?: string }): string {
   if (args.settings.mode === 'twitch') return buildTwitchSelectionPrompt(args);
   const { settings: s } = args;
   const qty =
     s.maxClips === 'auto'
-      ? 'Quantidade: proponha de 6 a 10 cortes espalhados pelo vídeo, com notas realistas (os melhores serão escolhidos, mínimo de 5 se o vídeo tiver material).'
+      ? QUALITY_QTY
       : `Quantidade: proponha até ${Math.min(60, (s.maxClips as number) * 2)} candidatos (serão escolhidos os ${s.maxClips} melhores).`;
   return `Duração total do vídeo: ${args.videoDuration.toFixed(0)}s.
 Duração desejada por corte: ~${s.targetDuration}s (flexível: entre ${Math.round(s.targetDuration * 0.6)}s e ${Math.round(s.targetDuration * 1.5)}s, somando os trechos).
 ${qty}
 
+${VIRAL_FORMATS}
+
 Análise do vídeo:
 ${knowledgeToText(args.knowledge)}
-
+${args.transcriptText ? `
+Transcrição completa (use para achar onde cada ideia COMEÇA e TERMINA de verdade):
+${args.transcriptText}
+` : ''}
 Monte cada corte com 1 a 4 trechos ("segments"), na ordem em que devem aparecer. Você PODE juntar trechos distantes
 quando isso deixar o corte mais forte (ex.: abrir com a conclusão/frase de impacto do final e depois mostrar o contexto
 do início; ou juntar falas boas espalhadas sobre o mesmo assunto). Cada corte precisa fazer sentido sozinho para quem
@@ -193,12 +230,14 @@ export function buildSelectionPrompt(args: {
   const { settings: s } = args;
   const qty =
     s.maxClips === 'auto'
-      ? 'Quantidade: decida você — inclua apenas trechos realmente bons (nota >= 60). Pode ser 1 ou muitos.'
+      ? QUALITY_QTY
       : `Quantidade: proponha até ${Math.min(60, (s.maxClips as number) * 2)} candidatos (serão escolhidos os ${s.maxClips} melhores).`;
   return `Vídeo com duração total de ${formatTimestamp(args.videoDuration)} (${args.videoDuration.toFixed(0)}s).
 ${args.chunkInfo ?? ''}
 Duração média desejada por corte: ~${s.targetDuration}s (referência flexível: entre ${Math.round(s.targetDuration * 0.6)}s e ${Math.round(s.targetDuration * 1.5)}s).
 ${qty}
+
+${VIRAL_FORMATS}
 ${args.visualNotes ? `\nContexto visual (frames amostrados):\n${args.visualNotes}\n` : ''}
 Transcrição com timestamps (segundos absolutos):
 ${args.transcriptText}
@@ -229,6 +268,19 @@ const MEME_RULES = `MEMES E SONS — VALIDE ANTES DE USAR:
   mais baixo — quando o som do meme é curto/de fundo e a fala continua relevante.
 - Não coloque efeito sonoro em cima de um meme com áudio em modo "meme" ou "both" (fica embolado).
 - Não repita o mesmo meme ou som no mesmo corte.
+
+`;
+
+const ILLUSTRATION_RULES = `ILUSTRAÇÕES ("illustrations") — imagem do que está sendo falado, para o espectador visualizar:
+- Só para coisas CONCRETAS e reconhecíveis citadas na fala: objeto (avião, moto), animal, lugar, comida, marca,
+  pessoa famosa, filme, série, jogo. Nunca para ideias abstratas, sentimentos ou para o próprio streamer/convidados.
+- "at" = o instante em que a palavra é dita (use os tempos da transcrição); duração 1,5-3s.
+- "query": o nome em INGLÊS como seria o título do artigo na Wikipedia: substantivo simples para coisas ("Airplane",
+  "Pizza", "Lion"), nome completo para pessoas ("Neymar"), título oficial para filme/série/jogo ("Interstellar",
+  "Grand Theft Auto V"). Sem adjetivos nem frases. "label": o nome em português.
+- "kind" ∈ object|animal|place|person|brand|movie|series|game|food|other.
+- "position": top (padrão), top-left ou top-right — nunca em cima do rosto; não use no mesmo instante de um meme.
+- Na dúvida, não ilustre: no máximo 1 a cada ~10s, só quando a imagem ajuda a entender ou deixa o corte mais bonito.
 
 `;
 
@@ -273,6 +325,8 @@ export function buildPlanPrompt(args: {
   splitLayout?: boolean;
   /** Catálogo pré-selecionado com códigos curtos (m1, s1...) — substitui a listagem por pasta. */
   catalog?: string;
+  /** Pede ilustrações (imagens buscadas na internet) do que é falado. */
+  illustrations?: boolean;
 }): string {
   const { settings: s } = args;
   const vertical = s.format === 'vertical_blur' || s.format === 'vertical_crop';
@@ -299,7 +353,7 @@ Formato de saída: ${s.format}. Memes ${s.useMemes ? 'permitidos' : 'DESATIVADOS
 
 ${s.mode === 'twitch' ? TWITCH_EDIT_RULES : ''}${args.splitLayout ? 'Layout fixo facecam (em cima) + jogo (embaixo): retorne "shots": [] e zooms leves (scale <= 1.12).\n' : ''}
 ${MEME_RULES}
-${args.catalog ? `Biblioteca (pré-selecionada para estes cortes; use os CÓDIGOS em "file"):\n${args.catalog}` : `Biblioteca local disponível (categoria: arquivos):\n${describeLibrary(args.library, 25, args.assetMeta)}`}
+${args.illustrations ? ILLUSTRATION_RULES : ''}${args.catalog ? `Biblioteca (pré-selecionada para estes cortes; use os CÓDIGOS em "file"):\n${args.catalog}` : `Biblioteca local disponível (categoria: arquivos):\n${describeLibrary(args.library, 25, args.assetMeta)}`}
 
 Cortes (transcrição com tempos RELATIVOS ao início de cada corte):
 ${args.clips
@@ -314,7 +368,12 @@ Retorne JSON exatamente neste formato:
  "shots":[{"at":0,"duration":4.5,"type":"focus","focusX":0.28,"focusY":0.42,"scale":1,"reason":"A fala"},{"at":4.5,"duration":3,"type":"wide","reason":"os dois riem"},{"at":7.5,"duration":3,"type":"focus","focusX":0.55,"focusY":0.7,"scale":1.6,"reason":"close na comida"}],
  "zooms":[{"at":2.5,"duration":2,"scale":1.2,"focusX":0.5,"focusY":0.4}],
  "overlays":[{"type":"meme","file":"m12","at":8.1,"duration":2.5,"position":"center","scale":0.7,"audioMode":"meme","reason":"ele leva um susto e o meme é um gato assustado gritando"}],
- "sfx":[{"file":"s3","at":8.1,"volume":0.8,"reason":"impacto no susto"}],
+ "sfx":[{"file":"s3","at":8.1,"volume":0.8,"reason":"impacto no susto"}],${
+   args.illustrations
+     ? `
+ "illustrations":[{"at":3.2,"duration":2.5,"query":"commercial airplane","label":"avião","kind":"object","position":"top","reason":"ele fala do avião"}],`
+     : ''
+ }
  "emphasisWords":["palavra","chave"],
  "title":"título final do post (máx. 70 caracteres, gancho forte)",
  "description":"legenda do post: 1-3 frases que geram curiosidade + chamada para ação",

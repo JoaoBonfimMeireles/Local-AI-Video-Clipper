@@ -24,14 +24,16 @@ import {
   addJobLog,
   dataPaths,
   getAppSettings,
+  getFavorite,
   getJob,
   listClips,
   resolveLibraryFile,
   scanLibrary,
   updateClip,
+  updateFavorite,
   updateJobProgress,
 } from '@clipper/shared/server';
-import { analyzeAssets, buildAss, buildSrt, canvasSize, extractThumbnail, prepareClipSource, probe, renderClip } from '@clipper/video-processing';
+import { analyzeAssets, buildAss, buildSrt, canvasSize, extractThumbnail, planSoundPauses, prepareClipSource, probe, renderClip, shiftForPauses } from '@clipper/video-processing';
 import { rankCardsFor } from './pipeline';
 import { cachedStyleGuide, combineGuidelines } from './references';
 
@@ -53,15 +55,20 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
   };
   const progress = (p: number, step = 'plan') => updateJobProgress(job.id, step, p);
 
-  const parent = getJob(rev.parentJobId);
-  if (!parent?.result?.outputDir) throw new Error('Job original não encontrado (ou sem saída).');
-  const clip = listClips(parent.id).find((c) => c.index === rev.clipIndex);
-  if (!clip?.metadataPath || !fs.existsSync(clip.metadataPath)) throw new Error('Corte original não encontrado.');
-  const meta = JSON.parse(fs.readFileSync(clip.metadataPath, 'utf8'));
+  // Origem: o corte do job ou a cópia guardada nos favoritos (que não depende mais do job)
+  const fav = rev.favoriteId ? getFavorite(rev.favoriteId) : null;
+  if (rev.favoriteId && !fav) throw new Error('Favorito não encontrado.');
+  const parent = fav ? null : getJob(rev.parentJobId);
+  if (!fav && !parent?.result?.outputDir) throw new Error('Job original não encontrado (ou sem saída).');
+  const clip = parent ? listClips(parent.id).find((c) => c.index === rev.clipIndex) : null;
+  const metadataPath = fav ? fav.metadataPath : clip?.metadataPath;
+  if (!metadataPath || !fs.existsSync(metadataPath)) throw new Error('Corte original não encontrado.');
+  const meta = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
   const ctx: RenderContext | undefined = meta.renderContext;
   if (!ctx) throw new Error('Este corte foi gerado por uma versão antiga do app (sem contexto de renderização). Reprocesse o vídeo uma vez para poder ajustar.');
-  const transcript: Transcript = JSON.parse(fs.readFileSync(path.join(parent.result.outputDir, 'transcript.json'), 'utf8'));
-  const s = parent.settings;
+  if (!fs.existsSync(ctx.input)) throw new Error(`O vídeo original não está mais em ${ctx.input}; sem ele não dá para refazer o corte.`);
+  const transcript: Transcript = JSON.parse(fs.readFileSync(fav ? path.join(fav.dir, 'transcript.json') : path.join(parent!.result!.outputDir!, 'transcript.json'), 'utf8'));
+  const s = { ...job.settings, revision: null };
   const app = getAppSettings();
   const n = String(rev.clipIndex + 1).padStart(3, '0');
   log('info', `Ajustando o corte ${rev.clipIndex + 1} ("${meta.title}") — pedido: ${rev.comment.slice(0, 200)}`);
@@ -144,10 +151,11 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
 
   // Renderização (mesmo caminho do pipeline principal)
   progress(0.35, 'render');
-  const clipsDir = path.join(parent.result.outputDir, 'clips');
+  const clipsDir = fav ? fav.dir : path.join(parent!.result!.outputDir!, 'clips');
+  const stem = fav ? 'clip' : `clip_${n}`;
   let version = 2;
-  while (fs.existsSync(path.join(clipsDir, `clip_${n}_v${version}.mp4`))) version++;
-  const base = path.join(clipsDir, `clip_${n}_v${version}`);
+  while (fs.existsSync(path.join(clipsDir, `${stem}_v${version}.mp4`))) version++;
+  const base = path.join(clipsDir, `${stem}_v${version}`);
   const workDir = path.join(dataPaths.temp, job.id);
   fs.mkdirSync(workDir, { recursive: true });
   const canvas = canvasSize(ctx.format, info);
@@ -162,6 +170,12 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
         rankCards: ctx.category === 'top5' ? rankCardsFor(segments) : undefined,
       })
     : undefined;
+  const pauses = planSoundPauses(
+    resolved.sfx.map((x) => ({ file: x.file, at: x.at, volume: x.volume, duration: x.duration ?? memeInfo.get(x.file)?.duration })),
+    words,
+    duration,
+  );
+  const pausedTotal = pauses.reduce((a, p) => a + p.duration, 0);
   let input = ctx.input;
   let start = segments[0].start;
   if (segments.length > 1 || ctx.inpaintRegion) {
@@ -179,16 +193,16 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
     shots: resolved.shots,
     cleanArea: ctx.cleanArea,
     split: ctx.layout?.cam ? { cam: ctx.layout.cam } : null,
+    content: ctx.layout?.content ?? null,
     zooms: resolved.zooms,
     overlays: resolved.overlays.map((o) => {
       const inf = memeInfo.get(o.file);
       const dur = inf && inf.duration > 0 ? Math.min(Math.max(o.duration, Math.min(inf.duration, 6)), inf.duration) : o.duration;
       return { file: o.file, at: o.at, duration: dur, position: o.position, scale: o.scale, hasAudio: inf?.hasAudio, volume: 0.9, greenScreen: inf?.greenScreen, keyColor: inf?.keyColor, audioMode: o.audioMode };
     }),
-    sfx: resolved.sfx.map((x) => {
-      const len = memeInfo.get(x.file)?.duration ?? 0;
-      return { file: x.file, at: x.at, volume: x.volume, duration: x.duration ?? (len > 0 ? Math.min(len, 5) : 5) };
-    }),
+    // Sons com o vídeo pausado (não atropelam a fala)
+    pauses,
+    sfx: [],
     assContent: ass,
     output: `${base}.mp4`,
     workDir,
@@ -199,7 +213,7 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
   });
   await extractThumbnail(`${base}.mp4`, `${base}.jpg`, Math.min(1.5, duration / 2)).catch(() => undefined);
   const srtPath = s.exportSrt ? `${base}.srt` : null;
-  if (srtPath) fs.writeFileSync(srtPath, buildSrt(words), 'utf8');
+  if (srtPath) fs.writeFileSync(srtPath, buildSrt(shiftForPauses(words, pauses)), 'utf8');
 
   const title = resolved.title || meta.title;
   const newMeta = {
@@ -207,7 +221,7 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
     title,
     description: resolved.description ?? meta.description,
     hashtags: resolved.hashtags.length ? resolved.hashtags : meta.hashtags,
-    duration: Number(duration.toFixed(3)),
+    duration: Number((duration + pausedTotal).toFixed(3)),
     source: { ...meta.source, start: Math.min(...segments.map((x) => x.start)), end: Math.max(...segments.map((x) => x.end)), segments },
     edit: {
       shots: resolved.shots,
@@ -217,28 +231,33 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
       emphasisWords: resolved.emphasisWords,
     },
     renderContext: { ...ctx, segments },
-    revision: { version, comment: rev.comment, changes: revised.changes ?? null, previous: path.basename(clip.outputPath ?? '') },
+    revision: { version, comment: rev.comment, changes: revised.changes ?? null, previous: path.basename((fav ? fav.videoPath : clip?.outputPath) ?? '') },
     files: { video: path.basename(`${base}.mp4`), thumbnail: path.basename(`${base}.jpg`), srt: srtPath ? { [transcript.language]: path.basename(srtPath) } : {} },
     transcript: words.map((w) => w.word).join(' '),
     renderedAt: new Date().toISOString(),
   };
   fs.writeFileSync(`${base}.json`, JSON.stringify(newMeta, null, 2), 'utf8');
-  // O corte do job original passa a apontar para a nova versão (a anterior continua na pasta)
-  updateClip(parent.id, rev.clipIndex, {
-    status: 'completed',
-    outputPath: `${base}.mp4`,
-    srtPath,
-    metadataPath: `${base}.json`,
-    title,
-    description: newMeta.description ?? null,
-    hashtags: newMeta.hashtags ?? [],
-  });
+  if (fav) {
+    // O favorito passa a mostrar a nova versão (as anteriores continuam na pasta dele)
+    updateFavorite(fav.id, { videoPath: `${base}.mp4`, srtPath, metadataPath: `${base}.json`, title, description: newMeta.description ?? null, hashtags: newMeta.hashtags ?? [], duration: newMeta.duration });
+  } else {
+    // O corte do job original passa a apontar para a nova versão (a anterior continua na pasta)
+    updateClip(parent!.id, rev.clipIndex, {
+      status: 'completed',
+      outputPath: `${base}.mp4`,
+      srtPath,
+      metadataPath: `${base}.json`,
+      title,
+      description: newMeta.description ?? null,
+      hashtags: newMeta.hashtags ?? [],
+    });
+  }
   try {
     fs.rmSync(workDir, { recursive: true, force: true, maxRetries: 5 });
   } catch {
     /* limpeza na próxima inicialização */
   }
-  log('info', `✔ clip_${n}_v${version}.mp4 pronto (${duration.toFixed(1)}s) — ${llm.usage.inputTokens.toLocaleString('pt-BR')} tokens de entrada`);
+  log('info', `✔ ${path.basename(base)}.mp4 pronto (${duration.toFixed(1)}s) — ${llm.usage.inputTokens.toLocaleString('pt-BR')} tokens de entrada`);
   progress(1, 'export');
   return { rendered: 1, failed: 0 };
 }

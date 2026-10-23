@@ -63,6 +63,10 @@ export const dataPaths = {
   get references() {
     return path.join(getDataDir(), 'references');
   },
+  /** Cortes favoritados (cópias independentes dos jobs). */
+  get favorites() {
+    return path.join(getDataDir(), 'favorites');
+  },
   get db() {
     return path.join(getDataDir(), 'database.db');
   },
@@ -79,6 +83,7 @@ export function ensureDataDirs(): void {
     d.memes,
     d.audio,
     d.references,
+    d.favorites,
   ];
   for (const dir of dirs) fs.mkdirSync(dir, { recursive: true });
 }

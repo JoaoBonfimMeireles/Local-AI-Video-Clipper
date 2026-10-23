@@ -40,6 +40,7 @@ export const AppSettingsSchema = z
     useReferences: z.boolean(),
     postLanguage: z.union([z.literal(''), z.string().regex(/^[a-z]{2,3}$/)]),
     anthropicModel: z.string().regex(/^[\w.\-]{1,80}$/),
+    anthropicSelectModel: z.string().regex(/^[\w.\-]{1,80}$/),
     ollamaUrl: z.string().url().regex(/^https?:\/\//),
     ollamaModel: z.string().regex(/^[\w.\-:/]{1,80}$/),
     whisperModel: z.string().regex(/^[\w.\-/]{1,100}$/),
@@ -47,6 +48,7 @@ export const AppSettingsSchema = z
     threads: z.coerce.number().int().min(1).max(64),
     hwAccel: z.enum(['none', 'nvenc']),
     sendFramesToAI: z.boolean(),
+    useIllustrations: z.boolean(),
   })
   .partial();
 
@@ -54,6 +56,8 @@ export const SecretsSchema = z
   .object({
     GEMINI_API_KEY: z.string().max(300),
     ANTHROPIC_API_KEY: z.string().max(300),
+    PIXABAY_API_KEY: z.string().max(300),
+    TMDB_API_KEY: z.string().max(400),
   })
   .partial();
 

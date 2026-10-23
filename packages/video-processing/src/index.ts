@@ -6,3 +6,5 @@ export * from './subtitles';
 export * from './render';
 export * from './prepare';
 export * from './assets';
+export * from './content';
+export * from './pauses';

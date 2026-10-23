@@ -33,7 +33,8 @@ export function selectClips<T extends ClipCandidate>(candidates: T[], opts: Sele
     .filter((c) => clipDuration(c) >= 3 && Number.isFinite(c.score))
     .sort((a, b) => b.score - a.score);
   const auto = opts.maxClips === 'auto';
-  const cap = auto ? Math.max(1, Math.min(20, Math.floor(opts.videoDuration / Math.max(15, opts.targetDuration) / 1.5) || 1)) : Math.max(1, opts.maxClips as number);
+  // Automático: a quantidade vem da QUALIDADE (nota mínima), não de uma meta; o teto só evita absurdos
+  const cap = auto ? Math.max(1, Math.min(60, Math.floor(opts.videoDuration / Math.max(15, opts.targetDuration)) || 1)) : Math.max(1, opts.maxClips as number);
   const minScore = auto ? opts.minScore ?? 55 : 0;
 
   // Compilações (ex.: Top 5 da live) reaproveitam os melhores momentos de propósito:
