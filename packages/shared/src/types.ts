@@ -56,6 +56,30 @@ export interface JobSettings {
   /** Modo Twitch: quais tipos de momento procurar. */
   twitchCategories: TwitchCategory[];
   twitchLayout: TwitchLayout;
+  /** Trecho do vídeo (s) em que a IA pode procurar cortes; null = vídeo inteiro. */
+  range?: { start: number; end: number } | null;
+  /** Áreas marcadas à mão no painel (câmera do streamer e conteúdo do react). */
+  manualLayout?: ManualLayout | null;
+}
+
+/** Retângulo em frações do quadro original (0..1). */
+export interface FrameBox {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+/**
+ * Áreas marcadas pelo editor:
+ * - cam: o quadradinho do streamer. shape 'circle' marca só o rosto; mode 'fill' expande até a câmera inteira e
+ *   ocupa o topo, mode 'bubble' mostra só o rosto num círculo no canto de cima, sobre o conteúdo.
+ * - content: a área do vídeo a que ele reage.
+ * - track: a IA acompanha se a pessoa/o player se mover (ajusta perto da área marcada); false = área fixa.
+ */
+export interface ManualLayout {
+  cam?: { box: FrameBox; shape: 'rect' | 'circle'; mode: 'fill' | 'bubble'; track: boolean } | null;
+  content?: { box: FrameBox; track: boolean } | null;
 }
 
 /**
@@ -102,7 +126,7 @@ export interface AppSettings {
 }
 
 export const DEFAULT_JOB_SETTINGS: JobSettings = {
-  targetDuration: 60,
+  targetDuration: 25,
   maxClips: 'auto',
   intensity: 'medium',
   format: 'vertical_blur',

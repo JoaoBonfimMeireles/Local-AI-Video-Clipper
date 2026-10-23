@@ -85,6 +85,56 @@ export interface DetectedFace {
   score: number;
 }
 
+export interface CamBox {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+/**
+ * Retângulo exato da facecam (o "quadradinho" do streamer) a partir do rosto dele e dos frames do corte:
+ * procura a moldura fixa em volta do rosto. null se não der para medir.
+ */
+export async function detectCamBox(framePaths: string[], face: { x: number; y: number; w: number; h: number }, signal?: AbortSignal): Promise<{ box: CamBox; method: string } | null> {
+  const step = Math.max(1, Math.floor(framePaths.length / 30));
+  const files = framePaths.filter((_, i) => i % step === 0).slice(0, 30);
+  try {
+    const res = await runProcess(
+      resolvePythonBinary(),
+      [pythonScriptPath('detect_cam.py'), ...[face.x, face.y, face.w, face.h].map((v) => v.toFixed(4)), ...files],
+      { env: { ...process.env, PYTHONIOENCODING: 'utf-8' }, signal, timeoutMs: 120_000 },
+    );
+    const parsed = JSON.parse(res.stdout.trim().split('\n').pop() || '{}');
+    return parsed.box ? { box: parsed.box, method: parsed.method } : null;
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    return null;
+  }
+}
+
+/**
+ * Player do vídeo assistido num react (post do Instagram/Facebook, YouTube...) dentro da tela: a região que muda,
+ * encaixada nas bordas fixas do player. `fill` = fração da área livre (sem a facecam) que ele ocupa.
+ */
+export async function detectPlayerBox(framePaths: string[], cam: CamBox | null, signal?: AbortSignal): Promise<{ box: CamBox; score: number; fill: number } | null> {
+  const step = Math.max(1, Math.floor(framePaths.length / 40));
+  const files = framePaths.filter((_, i) => i % step === 0).slice(0, 40);
+  const ex = cam ? [cam.x0, cam.y0, cam.x1, cam.y1] : [-1, -1, -1, -1];
+  try {
+    const res = await runProcess(resolvePythonBinary(), [pythonScriptPath('detect_player.py'), ...ex.map((v) => v.toFixed(4)), ...files], {
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+      signal,
+      timeoutMs: 120_000,
+    });
+    const parsed = JSON.parse(res.stdout.trim().split('\n').pop() || '{}');
+    return parsed.box ? { box: parsed.box, score: parsed.score ?? 0, fill: parsed.fill ?? 0 } : null;
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    return null;
+  }
+}
+
 /** Rostos por imagem (YuNet local). Em caso de erro, devolve listas vazias — o enquadramento segue só com a IA. */
 export async function detectFaces(framePaths: string[], signal?: AbortSignal): Promise<DetectedFace[][]> {
   const out: DetectedFace[][] = [];

@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label';
 import { Progress } from '@/components/ui/progress';
 import { Select } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { RegionSelector } from '@/components/region-selector';
 import { api, uploadFile } from '@/lib/client';
 import { cn } from '@/lib/utils';
 
@@ -81,7 +82,7 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
     const p = presets.find((x) => x.id === id);
     if (p) {
       // Créditos pertencem ao vídeo, não ao estilo: o preset não os sobrescreve
-      setSettings((cur) => ({ ...DEFAULT_JOB_SETTINGS, ...p.settings, creditTitle: cur.creditTitle, creditChannel: cur.creditChannel, creditUrl: cur.creditUrl }));
+      setSettings((cur) => ({ ...DEFAULT_JOB_SETTINGS, ...p.settings, creditTitle: cur.creditTitle, creditChannel: cur.creditChannel, creditUrl: cur.creditUrl, range: cur.range, manualLayout: cur.manualLayout }));
       setPresetName(p.builtin ? '' : p.name);
     }
   }
@@ -166,7 +167,14 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
           <div className="flex items-end gap-2">
             <div className="flex-1 space-y-1.5">
               <Label>Ou selecione de data/input</Label>
-              <Select value={selected} onChange={(e) => setSelected(e.target.value)}>
+              <Select
+                value={selected}
+                onChange={(e) => {
+                  setSelected(e.target.value);
+                  // Trecho e áreas valem para um vídeo específico
+                  setSettings((s) => ({ ...s, range: null, manualLayout: null }));
+                }}
+              >
                 {!files.length && <option value="">Nenhum vídeo em data/input</option>}
                 {files.map((f) => (
                   <option key={f.name} value={f.name}>
@@ -179,6 +187,16 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
               <RefreshCw />
             </Button>
           </div>
+          {selected && (
+            <RegionSelector
+              key={selected}
+              videoName={selected}
+              range={settings.range ?? null}
+              layout={settings.manualLayout ?? null}
+              onRange={(r) => set('range', r)}
+              onLayout={(l) => set('manualLayout', l)}
+            />
+          )}
         </section>
 
         {/* Perfis */}
@@ -272,13 +290,13 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
             <Label>Duração média dos cortes (s)</Label>
             <div className="flex flex-wrap gap-2">
               <Input type="number" min={10} max={600} value={settings.targetDuration} onChange={(e) => set('targetDuration', Number(e.target.value) || 60)} className="w-24" />
-              {[30, 60, 120, 180].map((d) => (
+              {[20, 25, 30, 40].map((d) => (
                 <Button key={d} type="button" size="sm" variant={settings.targetDuration === d ? 'default' : 'outline'} className="h-9" onClick={() => set('targetDuration', d)}>
                   {d}s
                 </Button>
               ))}
             </div>
-            <p className="text-xs text-muted-foreground">Referência flexível: a IA respeita o fim das frases.</p>
+            <p className="text-xs text-muted-foreground">Faixa de ouro dos Shorts: 15–20s (loop) ou 20–40s (história). A IA respeita o fim das frases.</p>
           </div>
           <div className="space-y-1.5">
             <Label>Quantidade de cortes</Label>

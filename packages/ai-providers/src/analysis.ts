@@ -298,6 +298,7 @@ export async function aiSelectFromKnowledge(args: {
     reason: x.reason,
     hook: x.hook,
     category: x.category,
+    shortFormat: x.shortFormat ?? null,
   }));
 }
 

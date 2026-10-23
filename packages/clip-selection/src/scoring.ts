@@ -15,6 +15,8 @@ export interface ClipCandidate {
   segments?: ClipSegment[];
   /** Modo Twitch: tipo de momento (funny, scary, top5...). */
   category?: string;
+  /** Formato da faixa de ouro dos Shorts: "loop" (15-20s) ou "story" (20-40s). */
+  shortFormat?: 'loop' | 'story' | null;
   score: number;
   title: string;
   reason: string;

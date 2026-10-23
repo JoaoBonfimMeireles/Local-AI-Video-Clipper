@@ -1,6 +1,10 @@
 import { z } from 'zod';
 
 const Lang = z.string().regex(/^(auto|[a-z]{2,3})$/);
+const Frac = z.number().min(0).max(1);
+const FrameBox = z
+  .object({ x0: Frac, y0: Frac, x1: Frac, y1: Frac })
+  .refine((b) => b.x1 - b.x0 >= 0.02 && b.y1 - b.y0 >= 0.02, 'área muito pequena');
 
 export const JobSettingsSchema = z.object({
   targetDuration: z.coerce.number().int().min(10).max(600),
@@ -20,6 +24,18 @@ export const JobSettingsSchema = z.object({
   creditTitle: z.string().trim().max(300).default(''),
   creditChannel: z.string().trim().max(200).default(''),
   creditUrl: z.union([z.literal(''), z.string().trim().url().regex(/^https?:\/\//, 'link deve começar com http(s)://')]).default(''),
+  range: z
+    .object({ start: z.number().min(0), end: z.number().min(0) })
+    .refine((r) => r.end - r.start >= 5, 'o trecho precisa ter pelo menos 5s')
+    .nullable()
+    .default(null),
+  manualLayout: z
+    .object({
+      cam: z.object({ box: FrameBox, shape: z.enum(['rect', 'circle']), mode: z.enum(['fill', 'bubble']), track: z.boolean() }).nullable().optional(),
+      content: z.object({ box: FrameBox, track: z.boolean() }).nullable().optional(),
+    })
+    .nullable()
+    .default(null),
 });
 
 export const CreateJobSchema = z.object({

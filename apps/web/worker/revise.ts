@@ -33,8 +33,9 @@ import {
   updateFavorite,
   updateJobProgress,
 } from '@clipper/shared/server';
-import { analyzeAssets, buildAss, buildSrt, canvasSize, extractThumbnail, planSoundPauses, prepareClipSource, probe, renderClip, shiftForPauses } from '@clipper/video-processing';
+import { analyzeAssets, buildAss, buildSrt, canvasSize, captionCues, extractThumbnail, planSoundPauses, prepareClipSource, probe, renderClip, shiftForPauses, splitTopRatio } from '@clipper/video-processing';
 import { rankCardsFor } from './pipeline';
+import { translateCaptions, writeCaptionFiles } from './captions';
 import { cachedStyleGuide, combineGuidelines } from './references';
 
 interface RenderContext {
@@ -166,7 +167,7 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
         width: canvas.width,
         height: canvas.height,
         intensity: s.intensity,
-        baseline: ctx.layout?.cam ? 0.53 : undefined,
+        baseline: ctx.layout?.cam ? splitTopRatio({ w: (ctx.layout.cam.x1 - ctx.layout.cam.x0) * info.width, h: (ctx.layout.cam.y1 - ctx.layout.cam.y0) * info.height }, canvas.width, canvas.height) + 0.15 : undefined,
         rankCards: ctx.category === 'top5' ? rankCardsFor(segments) : undefined,
       })
     : undefined;
@@ -183,7 +184,7 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
     start = 0;
     await prepareClipSource({ input: ctx.input, segments, source: info, subtitleRegion: ctx.inpaintRegion, output: input, workDir, signal, onProgress: (p) => progress(0.35 + p * 0.3, 'render') });
   }
-  await renderClip({
+  const renderArgs: Parameters<typeof renderClip>[0] = {
     input,
     start,
     end: start + duration,
@@ -194,6 +195,7 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
     cleanArea: ctx.cleanArea,
     split: ctx.layout?.cam ? { cam: ctx.layout.cam } : null,
     content: ctx.layout?.content ?? null,
+    bubble: ctx.layout?.bubble ?? null,
     zooms: resolved.zooms,
     overlays: resolved.overlays.map((o) => {
       const inf = memeInfo.get(o.file);
@@ -209,9 +211,45 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
     hwAccel: app.hwAccel,
     threads: app.threads,
     signal,
-    onProgress: (p) => progress(0.65 + p * 0.3, 'render'),
-  });
+    onProgress: (p) => progress(0.5 + p * 0.25, 'render'),
+  };
+  await renderClip(renderArgs);
   await extractThumbnail(`${base}.mp4`, `${base}.jpg`, Math.min(1.5, duration / 2)).catch(() => undefined);
+
+  // Legendas em 4 idiomas + versão com legenda em mandarim (igual ao corte principal)
+  const cards = ctx.category === 'top5' ? rankCardsFor(segments) : undefined;
+  const captions = (
+    await translateCaptions({
+      llm,
+      clips: [{ index: 0, cues: captionCues(words), labels: cards?.map((r) => r.label) ?? [] }],
+      sourceLang: transcript.language,
+      guidelines: app.editingPrompt,
+      signal,
+      log: (l, m) => log(l, m),
+    })
+  )[0];
+  let videoZh: string | null = null;
+  if (s.burnSubtitles && captions?.cues.zh?.length) {
+    try {
+      const zhLabels = captions.labels.zh ?? [];
+      const zhAss = buildAss([], {
+        width: canvas.width,
+        height: canvas.height,
+        intensity: s.intensity,
+        baseline: ctx.layout?.cam ? splitTopRatio({ w: (ctx.layout.cam.x1 - ctx.layout.cam.x0) * info.width, h: (ctx.layout.cam.y1 - ctx.layout.cam.y0) * info.height }, canvas.width, canvas.height) + 0.15 : undefined,
+        rankCards: cards?.map((r, i) => ({ ...r, label: zhLabels[i] || r.label })),
+        cues: captions.cues.zh,
+        font: 'Microsoft YaHei',
+        topTitle: '精彩时刻',
+      });
+      await renderClip({ ...renderArgs, assContent: zhAss, output: `${base}.zh.mp4`, onProgress: (p) => progress(0.75 + p * 0.22, 'render') });
+      videoZh = `${base}.zh.mp4`;
+    } catch (e) {
+      if (signal.aborted) throw e;
+      log('warn', `Versão em mandarim falhou: ${(e as Error).message}`);
+    }
+  }
+  const subtitleFiles = writeCaptionFiles(base, captions, pauses);
   const srtPath = s.exportSrt ? `${base}.srt` : null;
   if (srtPath) fs.writeFileSync(srtPath, buildSrt(shiftForPauses(words, pauses)), 'utf8');
 
@@ -232,7 +270,13 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
     },
     renderContext: { ...ctx, segments },
     revision: { version, comment: rev.comment, changes: revised.changes ?? null, previous: path.basename((fav ? fav.videoPath : clip?.outputPath) ?? '') },
-    files: { video: path.basename(`${base}.mp4`), thumbnail: path.basename(`${base}.jpg`), srt: srtPath ? { [transcript.language]: path.basename(srtPath) } : {} },
+    files: {
+      video: path.basename(`${base}.mp4`),
+      videoZh: videoZh ? path.basename(videoZh) : null,
+      thumbnail: path.basename(`${base}.jpg`),
+      srt: srtPath ? { [transcript.language]: path.basename(srtPath) } : {},
+      subtitles: subtitleFiles,
+    },
     transcript: words.map((w) => w.word).join(' '),
     renderedAt: new Date().toISOString(),
   };

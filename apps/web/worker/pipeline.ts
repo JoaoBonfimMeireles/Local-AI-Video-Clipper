@@ -7,7 +7,9 @@ import {
   aiSelectCandidates,
   aiSelectFromKnowledge,
   createLLM,
+  detectCamBox,
   detectFaces,
+  detectPlayerBox,
   detectSubtitleRegion,
   estimateCostUsd,
   silentGaps,
@@ -45,6 +47,7 @@ import {
   analyzeEnergy,
   buildAss,
   buildSrt,
+  captionCues,
   canvasSize,
   detectSceneChanges,
   detectSilences,
@@ -52,6 +55,7 @@ import {
   detectContentRegion,
   extractAudio,
   planSoundPauses,
+  splitTopRatio,
   shiftForPauses,
   type AssetInfo,
   extractClipFramesFps,
@@ -68,7 +72,9 @@ import {
   type ExtractedFrame,
 } from '@clipper/video-processing';
 import { combineGuidelines, getStyleGuide } from './references';
+import { translateCaptions, writeCaptionFiles, type ClipCaptions } from './captions';
 import { getIllustration } from './illustrations';
+import { manualClipLayout } from './manual-layout';
 
 // Faixa de progresso global de cada etapa
 const STEP_RANGE: Record<PipelineStep, [number, number]> = {
@@ -272,6 +278,21 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
   const appGuided = { ...app, editingPrompt: guidelines };
   if (llm) log('info', `IA: ${result.provider}${app.editingPrompt.trim() ? ' — usando suas diretrizes editoriais' : ''}${styleGuide ? ' — seguindo o guia de estilo das referências' : ''}`);
 
+  // Trecho marcado no painel: a IA só olha (e só corta) dentro dele
+  const range = s.range && s.range.end - s.range.start >= 5 ? { start: Math.max(0, s.range.start), end: Math.min(info.duration, s.range.end) } : null;
+  const inRange = (a: number, b: number) => !range || (b > range.start && a < range.end);
+  const aiTranscript = range ? { ...transcript, segments: transcript.segments.filter((seg) => inRange(seg.start, seg.end)) } : transcript;
+  const aiFrames = range ? frames.filter((f) => inRange(f.time, f.time)) : frames;
+  if (range) log('info', `Trecho escolhido: ${formatTimestamp(range.start)} → ${formatTimestamp(range.end)} (${Math.round(range.end - range.start)}s); a IA só procura cortes nele`);
+  /** Mantém os trechos de um corte dentro do intervalo escolhido. */
+  const clampToRange = (c: ClipCandidate): ClipCandidate | null => {
+    if (!range) return c;
+    const segs = segmentsOf(c)
+      .map((sg) => ({ ...sg, start: Math.max(sg.start, range.start), end: Math.min(sg.end, range.end) }))
+      .filter((sg) => sg.end - sg.start > 1);
+    return segs.length ? { ...c, segments: segs, start: Math.min(...segs.map((x) => x.start)), end: Math.max(...segs.map((x) => x.end)) } : null;
+  };
+
   // Conhecimento do vídeo (resumo, pessoas, momentos): calculado uma vez por vídeo e reaproveitado
   // em qualquer job futuro com o mesmo arquivo — economiza transcrição + frames nas próximas edições.
   const cacheBase = videoCacheBase(job.inputPath, app.whisperModel, s.sourceLanguage);
@@ -280,7 +301,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
     // A análise de live (Twitch) tem outro olhar e outras categorias: cache separado por modo
     // v2: análise de live mais densa (≈1 momento/30s) e com picos de volume — invalida análises antigas mais rasas
     // Análise feita por modelo gratuito/limitado fica separada: com IA paga o vídeo é reanalisado com mais qualidade
-    const kFile = `${cacheBase}.knowledge${s.mode === 'twitch' ? '-twitch-v3' : ''}${llm.free ? '-free' : ''}.json`;
+    const kFile = `${cacheBase}.knowledge${s.mode === 'twitch' ? '-twitch-v3' : ''}${llm.free ? '-free' : ''}${range ? `-r${Math.round(range.start)}-${Math.round(range.end)}` : ''}.json`;
     if (fs.existsSync(kFile)) {
       knowledge = JSON.parse(fs.readFileSync(kFile, 'utf8')) as VideoKnowledge;
       log('info', `Conhecimento do vídeo reaproveitado do cache (${knowledge.moments.length} momentos) — sem reenviar transcrição e frames`);
@@ -309,7 +330,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
                 .slice(0, 10)
                 .sort((x, y) => x.start - y.start)
             : undefined;
-        knowledge = await aiAnalyzeVideo({ llm, transcript, videoDuration: info.duration, frames, sendImages: app.sendFramesToAI, mode: s.mode, audioPeaks, activeWindows, signal, log: (l, m) => log(l, m) });
+        knowledge = await aiAnalyzeVideo({ llm, transcript: aiTranscript, videoDuration: info.duration, frames: aiFrames, sendImages: app.sendFramesToAI, mode: s.mode, audioPeaks, activeWindows, signal, log: (l, m) => log(l, m) });
         fs.mkdirSync(path.dirname(kFile), { recursive: true });
         fs.writeFileSync(kFile, JSON.stringify(knowledge));
         log('info', `Análise concluída: ${knowledge.speakers.length} pessoa(s), ${knowledge.moments.length} momentos`);
@@ -348,11 +369,13 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       }
       segs = unique.slice(0, 5).map((sg) => (sg.end - sg.start > 24 ? { ...snapToSentences(sg.start, sg.start + 22, sentences, info.duration), label: sg.label } : sg));
     }
-    const maxDur = c.category === 'top5' ? Math.max(90, s.targetDuration * 2.5) : s.targetDuration * (s.mode === 'twitch' ? 2.5 : 1.6);
+    // Contexto vale mais que a duração: teto folgado (o corte precisa fazer sentido)
+    // Faixa de ouro: loop até ~22s, história até ~42s (folga para terminar a frase); Top N até 75s
+    const maxDur = c.category === 'top5' ? 75 : c.shortFormat === 'loop' ? 24 : c.shortFormat === 'story' ? 44 : Math.max(44, s.targetDuration * 1.6);
     const total = () => segs.reduce((a, sg) => a + (sg.end - sg.start), 0);
     // Corte normal curto demais (momento solto de 7-10s) ganha contexto antes e depois, em frases inteiras.
     // Compilações (top5) são feitas de trechos curtos de propósito.
-    const minDur = Math.min(25, s.targetDuration * 0.4);
+    const minDur = Math.min(c.shortFormat === 'loop' ? 14 : 18, s.targetDuration * 0.6);
     if (c.category !== 'top5' && total() < minDur) {
       const before = total();
       // Soma frases INTEIRAS vizinhas (depois e antes, alternando) até atingir o mínimo
@@ -391,21 +414,25 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
     if (llm) {
       try {
         if (knowledge) {
-          candidates = await aiSelectFromKnowledge({ llm, knowledge, transcript, settings: s, app: appGuided, videoDuration: info.duration, signal, log: (l, m) => log(l, m) });
+          candidates = await aiSelectFromKnowledge({ llm, knowledge, transcript: aiTranscript, settings: s, app: appGuided, videoDuration: info.duration, signal, log: (l, m) => log(l, m) });
         } else {
           log('info', `Enviando transcrição${app.sendFramesToAI && llm.supportsImages ? ' + frames' : ''} para ${llm.name}/${llm.model}`);
-          candidates = await aiSelectCandidates({ llm, transcript, settings: s, app: appGuided, videoDuration: info.duration, frames, signal, log: (l, m) => log(l, m) });
+          candidates = await aiSelectCandidates({ llm, transcript: aiTranscript, settings: s, app: appGuided, videoDuration: info.duration, frames: aiFrames, signal, log: (l, m) => log(l, m) });
         }
-        candidates = candidates.map(tidy);
+        candidates = candidates.map(tidy).map(clampToRange).filter((c): c is ClipCandidate => !!c);
         log('info', `IA propôs ${candidates.length} candidatos (${candidates.filter((c) => segmentsOf(c).length > 1).length} juntando trechos)`);
       } catch (e) {
         if (signal.aborted) throw e;
+        // Sem crédito / chave inválida: parar é melhor que gerar dezenas de cortes ruins pela heurística
+        if (/credit balance|billing|insufficient|invalid x-api-key|authentication|HTTP 40[13]/i.test((e as Error).message)) {
+          throw new Error(`A IA (${llm.name}) recusou o pedido por falta de crédito ou chave inválida — recarregue o saldo/verifique a chave em Configurações e clique em "Tentar novamente". Detalhe: ${(e as Error).message.slice(0, 300)}`);
+        }
         log('warn', `Seleção por IA falhou (${(e as Error).message}); usando heurística local`);
         candidates = [];
       }
     }
     if (!candidates.length) {
-      candidates = heuristicCandidates(transcript, { targetDuration: s.targetDuration, videoDuration: info.duration, energy, sceneChanges: scenes });
+      candidates = heuristicCandidates(aiTranscript, { targetDuration: s.targetDuration, videoDuration: info.duration, energy, sceneChanges: scenes });
       log('info', `Heurística gerou ${candidates.length} candidatos`);
     }
     fs.writeFileSync(path.join(tempDir, 'candidates.json'), JSON.stringify(candidates));
@@ -487,23 +514,64 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
     // Lives: layout decidido POR CORTE (a facecam pode aparecer só em parte da live).
     // facecam visível → facecam + jogo; gameplay sem rosto grande → jogo inteiro, sem zooms; rosto grande → IRL (por pessoa)
     const layouts = new Map<number, ClipLayout>();
+    const manual = s.manualLayout?.cam || s.manualLayout?.content ? s.manualLayout : null;
     for (const c of selected) {
-      if (s.mode !== 'twitch') continue;
+      if (s.mode !== 'twitch' && !manual) continue;
       const v = visual.get(c.index)!;
+      // Áreas marcadas no painel mandam (com ajuste fino se "acompanhar" estiver ligado)
+      if (manual && verticalOut) {
+        const { layout, note } = await manualClipLayout(manual, v.frames, signal);
+        layouts.set(c.index, layout);
+        log('info', `Corte ${c.index + 1}: layout das áreas marcadas${note ? ` (${note})` : ''}`);
+        continue;
+      }
       // Facecam presente em metade dos frames do corte já é fixa (o detector de rosto falha quando a pessoa
       // se mexe, põe a mão no rosto, usa chapéu...); a da live inteira vale como reserva
       // A facecam da live inteira só vale se o rosto aparece mesmo nela em boa parte DESTE corte
       // (num corte em que o streamer levantou e está de câmera cheia, não existe facecam)
       const inBox = (b: { x0: number; y0: number; x1: number; y1: number }) =>
         v.frames.filter((f) => f.faces.some((x) => x.x >= b.x0 && x.x <= b.x1 && x.y >= b.y0 && x.y <= b.y1)).length / Math.max(1, v.frames.length);
-      const cam =
+      const rough =
         verticalOut && s.twitchLayout !== 'full'
           ? detectFacecam(v.frames.map((f) => f.faces), 0.5) ?? (splitLayout && (s.twitchLayout === 'split' || inBox(splitLayout.cam) >= 0.35) ? splitLayout.cam : null)
           : null;
+      // A caixa acima é só uma estimativa pelo rosto; o retângulo EXATO da câmera vem da moldura nos frames
+      // do corte (o streamer tem de aparecer inteiro, nunca cortado)
+      let cam = rough;
+      if (rough) {
+        const fs_ = v.frames.flatMap((f) => f.faces).filter((x) => x.x >= rough.x0 && x.x <= rough.x1 && x.y >= rough.y0 && x.y <= rough.y1);
+        if (fs_.length) {
+          const med = (k: 'x' | 'y' | 'w' | 'h') => fs_.map((x) => x[k]).sort((p, q) => p - q)[Math.floor(fs_.length / 2)];
+          const face = { x: med('x'), y: med('y'), w: med('w'), h: med('h') };
+          const exact = await detectCamBox(v.frames.map((f) => f.path), face, signal);
+          // Sanidade: a caixa tem de conter o rosto
+          if (exact && face.x > exact.box.x0 && face.x < exact.box.x1 && face.y > exact.box.y0 && face.y < exact.box.y1) cam = exact.box;
+        }
+      }
       // Pessoa na câmera cheia (rosto grande, ou de corpo inteiro em boa parte do corte) → enquadramento por pessoa
       const bigFace = v.frames.some((f) => f.faces.some((x) => x.w > 0.15)) || (!cam && v.frames.filter((f) => f.faces.some((x) => x.w > 0.04)).length >= v.frames.length * 0.4);
       // Onde está o conteúdo que se mexe (react: o vídeo assistido) — sem a facecam e sem molduras paradas
-      const content = verticalOut && (cam || !bigFace) ? await detectContentRegion(v.frames.map((f) => f.path), cam, signal).catch(() => null) : null;
+      // 1º: o PLAYER do vídeo assistido (post do Instagram/Facebook, YouTube...) — só ele, sem página/comentários
+      let content: { x0: number; y0: number; x1: number; y1: number } | null = null;
+      let isPlayer = false;
+      if (verticalOut && (cam || !bigFace)) {
+        const player = await detectPlayerBox(v.frames.map((f) => f.path), cam, signal);
+        // Player de verdade: bem mais movimento dentro do que em volta, e ocupando uma parte razoável da tela
+        if (player && player.score >= 2.5 && player.fill >= 0.08 && player.fill <= 0.85) {
+          content = player.box;
+          isPlayer = true;
+        } else {
+          content = await detectContentRegion(v.frames.map((f) => f.path), cam, signal).catch(() => null);
+        }
+      }
+      if (content && cam && !isPlayer) {
+        // Área de conteúdo pequena demais (ex.: só a mão se mexendo num close parado) ou invadindo a câmera
+        // não é confiável: usa a faixa livre inteira ao lado/abaixo da câmera
+        const area = (b: { x0: number; y0: number; x1: number; y1: number }) => Math.max(0, b.x1 - b.x0) * Math.max(0, b.y1 - b.y0);
+        const free = Math.max(cam.x0, 1 - cam.x1) * 1 >= 1 - cam.y1 ? Math.max(cam.x0, 1 - cam.x1) : 1 - cam.y1;
+        const overlap = area({ x0: Math.max(cam.x0, content.x0), y0: Math.max(cam.y0, content.y0), x1: Math.min(cam.x1, content.x1), y1: Math.min(cam.y1, content.y1) });
+        if (area(content) < free * 0.35 || overlap > area(cam) * 0.15) content = null;
+      }
       layouts.set(c.index, { cam, gameplay: !cam && !bigFace, content });
       const pct = (b: { x0: number; x1: number; y0: number; y1: number }) => `x ${Math.round(b.x0 * 100)}–${Math.round(b.x1 * 100)}%, y ${Math.round(b.y0 * 100)}–${Math.round(b.y1 * 100)}%`;
       log('info', `Corte ${c.index + 1}: layout ${cam ? `facecam (${pct(cam)}) em cima + ${content ? `conteúdo (${pct(content)})` : 'jogo'} embaixo` : !bigFace ? `jogo/conteúdo inteiro${content ? ` (${pct(content)})` : ''}` : 'IRL (enquadramento por pessoa)'}`);
@@ -728,6 +796,23 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
   let failed = 0;
   const clipsMeta: unknown[] = [];
 
+  // Legendas em 4 idiomas (pt, en, es, zh) de todos os cortes: uma chamada barata por idioma, em cache
+  const captions = await cached<Record<number, ClipCaptions>>('captions_4lang.json', () =>
+    translateCaptions({
+      llm: translateLlm,
+      clips: selected.map((c) => ({
+        index: c.index,
+        cues: captionCues(clipWords.get(c.index)!),
+        labels: c.category === 'top5' ? rankCardsFor(c.segments).map((r) => r.label) : [],
+      })),
+      sourceLang: transcript.language,
+      guidelines: app.editingPrompt,
+      signal,
+      log: (l, m) => log(l, m),
+    }),
+  );
+  if (!translateLlm) log('warn', 'Sem provedor de IA: legendas só no idioma original e sem a versão em mandarim');
+
   for (const c of selected) {
     signal.throwIfAborted();
     const n = String(c.index + 1).padStart(3, '0');
@@ -750,7 +835,8 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
             width: canvas.width,
             height: canvas.height,
             intensity: s.intensity,
-            baseline: edit.layout?.cam ? 0.53 : undefined,
+            // Legenda logo abaixo da emenda câmera/conteúdo
+            baseline: edit.layout?.cam ? splitTopRatio({ w: (edit.layout.cam.x1 - edit.layout.cam.x0) * info.width, h: (edit.layout.cam.y1 - edit.layout.cam.y0) * info.height }, canvas.width, canvas.height) + 0.15 : undefined,
             rankCards: c.category === 'top5' ? rankCardsFor(c.segments) : undefined,
           })
         : undefined;
@@ -772,7 +858,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         duration,
       );
       if (pauses.length) log('info', `Corte ${c.index + 1}: ${pauses.length} som(ns) com o vídeo pausado (${pauses.map((p) => `${p.at.toFixed(1)}s`).join(', ')})`);
-      await renderClip({
+      const renderArgs: Parameters<typeof renderClip>[0] = {
         input,
         start,
         end: start + duration,
@@ -784,6 +870,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         cleanArea,
         split: edit.layout?.cam ? { cam: edit.layout.cam } : null,
         content: edit.layout?.content ?? null,
+        bubble: edit.layout?.bubble ?? null,
         zooms: edit.zooms,
         overlays: edit.overlays.map((o) => {
           const inf = assetInfo.get(o.file);
@@ -800,9 +887,37 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         hwAccel: app.hwAccel,
         threads: app.threads,
         signal,
-        onProgress: (p) => tick(input === job.inputPath ? p * 0.95 : 0.5 + p * 0.45),
-      });
+        onProgress: (p) => tick(input === job.inputPath ? p * 0.6 : 0.3 + p * 0.35),
+      };
+      await renderClip(renderArgs);
       await extractThumbnail(`${base}.mp4`, `${base}.jpg`, Math.min(1.5, duration / 2)).catch(() => undefined);
+
+      // Mesma edição, legenda em mandarim (chinês simplificado): reaproveita a fonte já preparada do corte
+      let videoZh: string | null = null;
+      const zh = captions[c.index]?.cues.zh;
+      if (s.burnSubtitles && zh?.length) {
+        try {
+          const cards = c.category === 'top5' ? rankCardsFor(c.segments) : undefined;
+          const zhLabels = captions[c.index]?.labels.zh ?? [];
+          const zhAss = buildAss([], {
+            width: canvas.width,
+            height: canvas.height,
+            intensity: s.intensity,
+            baseline: edit.layout?.cam ? splitTopRatio({ w: (edit.layout.cam.x1 - edit.layout.cam.x0) * info.width, h: (edit.layout.cam.y1 - edit.layout.cam.y0) * info.height }, canvas.width, canvas.height) + 0.15 : undefined,
+            rankCards: cards?.map((r, i) => ({ ...r, label: zhLabels[i] || r.label })),
+            cues: zh,
+            font: 'Microsoft YaHei',
+            topTitle: '精彩时刻',
+          });
+          await renderClip({ ...renderArgs, assContent: zhAss, output: `${base}.zh.mp4`, onProgress: (p) => tick(0.65 + p * 0.33) });
+          videoZh = `${base}.zh.mp4`;
+          log('info', `✔ clip_${n}.zh.mp4 (legenda em mandarim) renderizado`);
+        } catch (e) {
+          if (signal.aborted) throw e;
+          log('warn', `Versão em mandarim do corte ${c.index + 1} falhou: ${(e as Error).message}`);
+        }
+      }
+      const subtitleFiles = writeCaptionFiles(base, captions[c.index], pauses);
       const pausedTotal = pauses.reduce((a, p) => a + p.duration, 0);
 
       let srtPath: string | null = null;
@@ -826,6 +941,9 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         reason: c.reason,
         hook: c.hook ?? null,
         description: edit.description ?? null,
+        // Faixa de ouro dos Shorts: formato escolhido e texto sugerido para a capa
+        shortFormat: c.shortFormat ?? null,
+        coverText: edit.coverText ?? null,
         hashtags: edit.hashtags,
         source: { file: path.basename(job.inputPath), start: c.start, end: c.end, segments: c.segments },
         duration: Number((duration + pausedTotal).toFixed(3)),
@@ -856,7 +974,14 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
           sfx: edit.sfx.map((x) => ({ ...x, file: x.fileName })),
           emphasisWords: edit.emphasisWords,
         },
-        files: { video: path.basename(`${base}.mp4`), thumbnail: path.basename(`${base}.jpg`), srt: srtFiles },
+        files: {
+          video: path.basename(`${base}.mp4`),
+          videoZh: videoZh ? path.basename(videoZh) : null,
+          thumbnail: path.basename(`${base}.jpg`),
+          srt: srtFiles,
+          // Legendas para subir no YouTube/TikTok: SRT e SBV em português, inglês, espanhol e chinês
+          subtitles: subtitleFiles,
+        },
         transcript: words.map((w) => w.word).join(' '),
         renderedAt: new Date().toISOString(),
       };

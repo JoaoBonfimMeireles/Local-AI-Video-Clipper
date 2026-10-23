@@ -76,6 +76,8 @@ export interface RenderSpec {
    * no quadro original (frações: x0, y0, x1, y1). game = centro horizontal do jogo (0-1).
    */
   split?: { cam: { x0: number; y0: number; x1: number; y1: number }; gameX?: number; camRatio?: number } | null;
+  /** Rosto do streamer num círculo no canto superior, por cima do conteúdo (área do rosto no quadro original). */
+  bubble?: { x0: number; y0: number; x1: number; y1: number } | null;
   /** Efeitos sonoros com o vídeo pausado (congelado) enquanto tocam — não atropelam a fala. */
   pauses?: SoundPause[];
   /** Área do conteúdo no quadro original (ex.: o vídeo assistido num react), sem a facecam nem molduras. */
@@ -120,6 +122,15 @@ function overlayInputArgs(file: string, duration: number): string[] {
 
 /** Posição do meme. O meme inteiro fica SEMPRE dentro do quadro: "bottom" encosta a base do meme perto da
  * borda de baixo (personagem de green screen aparece de corpo inteiro, nunca só o topo da cabeça). */
+/**
+ * Altura da área da facecam (fração da tela) para a câmera ocupar a LARGURA toda na própria proporção.
+ * Fica entre 25% e 55% da altura; fora disso apara as sobras da câmera.
+ */
+export function splitTopRatio(camPx: { w: number; h: number }, W: number, H: number): number {
+  const aspect = camPx.w / Math.max(1, camPx.h);
+  return Math.min(0.55, Math.max(0.25, W / aspect / H));
+}
+
 function overlayXY(pos: OverlayPosition, _vertical: boolean): string {
   // Entre aspas: as vírgulas do max/min não podem separar opções do filtro
   const inside = (y: string) => `'max(0,min(main_h-overlay_h,${y}))'`;
@@ -259,7 +270,8 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
     // Janela do tamanho do quadro inteiro = igual à base; não precisa de ramo
     .filter((b) => !(baseKind === 'scale' && b.winW >= srcW - 2 && b.winH >= srcH - 2));
 
-  const branches = 1 + (wideShots.length ? 1 : 0) + focusBranches.length;
+  const bubble = !split && spec.bubble ? spec.bubble : null;
+  const branches = 1 + (wideShots.length ? 1 : 0) + focusBranches.length + (bubble ? 1 : 0);
   const srcLabels = Array.from({ length: branches }, (_, i) => `s${i}`);
   if (branches > 1) f.push(`[src]split=${branches}${srcLabels.map((l) => `[${l}]`).join('')}`);
   else srcLabels[0] = 'src';
@@ -288,43 +300,48 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
       })()
     : null;
   if (split) {
-    // Facecam (em cima) + jogo (embaixo): cada parte recortada na proporção exata da sua área
-    const topH = even(H * Math.min(0.5, Math.max(0.25, split.camRatio ?? 0.38)));
-    const botH = H - topH;
-    const fit = (cx: number, cy: number, minW: number, minH: number, aspect: number) => {
-      let w = Math.max(minW, minH * aspect);
-      let h = w / aspect;
-      if (w > srcW) (w = srcW), (h = w / aspect);
-      if (h > srcH) (h = srcH), (w = h * aspect);
-      w = even(w);
-      h = even(h);
-      const x = Math.round(Math.min(srcW - w, Math.max(0, cx - w / 2)));
-      const y = Math.round(Math.min(srcH - h, Math.max(0, cy - h / 2)));
-      return { w, h, x, y };
-    };
+    // Facecam INTEIRA em cima, ocupando toda a largura na proporção da própria câmera (sem faixa vazia, sem cortar
+    // o streamer); o conteúdo embaixo, inteiro.
     const cam = split.cam;
-    const camBox = fit(((mapX(cam.x0) + mapX(cam.x1)) / 2) * srcW, ((mapY(cam.y0) + mapY(cam.y1)) / 2) * srcH, (mapX(cam.x1) - mapX(cam.x0)) * srcW, (mapY(cam.y1) - mapY(cam.y0)) * srcH, W / topH);
+    const cx0 = mapX(cam.x0) * srcW;
+    const cx1 = mapX(cam.x1) * srcW;
+    const cy0 = mapY(cam.y0) * srcH;
+    const cy1 = mapY(cam.y1) * srcH;
+    const topH = even(H * splitTopRatio({ w: cx1 - cx0, h: cy1 - cy0 }, W, H));
+    const botH = H - topH;
+    // Recorte SEMPRE dentro da câmera ("cover"): se a proporção não bate com a área, apara só as sobras
+    // (laterais da câmera, ou o rodapé — nunca a cabeça)
+    const slot = W / topH;
+    let cw = cx1 - cx0;
+    let ch = cy1 - cy0;
+    if (cw / ch > slot) cw = ch * slot;
+    else ch = cw / slot;
+    cw = even(Math.min(cw, srcW));
+    ch = even(Math.min(ch, srcH));
+    const camX = Math.round(Math.min(srcW - cw, Math.max(0, (cx0 + cx1) / 2 - cw / 2)));
+    const camY = Math.round(Math.min(srcH - ch, Math.max(0, cy0)));
     f.push(`[${baseIn}]split=2[cam0][game0]`);
-    f.push(`[cam0]crop=${camBox.w}:${camBox.h}:${camBox.x}:${camBox.y},scale=${W}:${topH},setsar=1[camv]`);
+    f.push(`[cam0]crop=${cw}:${ch}:${camX}:${camY},scale=${W}:${topH},setsar=1[camv]`);
     if (content) {
-      // React: o vídeo assistido INTEIRO embaixo, sem pedaço da facecam. Proporção parecida → preenche;
-      // muito diferente → mostra inteiro com fundo desfocado (nunca corta o conteúdo)
+      // React: o vídeo assistido INTEIRO embaixo, sem pedaço da facecam e sem aproximar demais. Só preenche
+      // quando a proporção é quase a mesma; senão mostra inteiro com desfoque nas sobras
       f.push(`[game0]crop=${content.w}:${content.h}:${content.x}:${content.y},setsar=1[gcrop]`);
       const ratio = content.w / content.h / (W / botH);
-      if (ratio > 0.85 && ratio < 1.18) f.push(`[gcrop]scale=${W}:${botH}:force_original_aspect_ratio=increase,crop=${W}:${botH},setsar=1[gamev]`);
+      if (ratio > 0.93 && ratio < 1.07) f.push(`[gcrop]scale=${W}:${botH}:force_original_aspect_ratio=increase,crop=${W}:${botH},setsar=1[gamev]`);
       else blurComposite('gcrop', 'gamev', 'g', W, botH);
     } else {
-      // Sem área de conteúdo detectada: recorte do jogo que NÃO invade a facecam (fica do outro lado dela)
-      const camL = mapX(cam.x0) * srcW;
-      const camR = mapX(cam.x1) * srcW;
-      const free = camL > srcW - camR ? { a: 0, b: camL } : { a: camR, b: srcW };
-      const want = srcH * (W / botH);
-      const gameBox = free.b - free.a >= want * 0.8 ? fit((free.a + free.b) / 2, srcH / 2, 0, srcH, W / botH) : fit((split.gameX ?? 0.5) * srcW, srcH / 2, 0, srcH, W / botH);
-      if (gameBox.x < free.a || gameBox.x + gameBox.w > free.b) {
-        // Não cabe ao lado da cam com a altura toda: encaixa a faixa livre inteira com fundo desfocado
-        f.push(`[game0]crop=${even(free.b - free.a)}:${even(srcH)}:${Math.round(free.a)}:0,setsar=1[gcrop]`);
-        blurComposite('gcrop', 'gamev', 'g', W, botH);
-      } else f.push(`[game0]crop=${gameBox.w}:${gameBox.h}:${gameBox.x}:${gameBox.y},scale=${W}:${botH},setsar=1[gamev]`);
+      // Sem área de conteúdo detectada: a faixa do quadro que não tem a câmera (ao lado ou abaixo dela), inteira,
+      // com desfoque nas sobras — nunca um zoom no meio do conteúdo
+      const sideW = Math.max(cx0, srcW - cx1);
+      const belowH = srcH - cy1;
+      const useSide = sideW * srcH >= belowH * srcW;
+      const free = useSide
+        ? cx0 >= srcW - cx1
+          ? { x: 0, y: 0, w: cx0, h: srcH }
+          : { x: cx1, y: 0, w: srcW - cx1, h: srcH }
+        : { x: 0, y: cy1, w: srcW, h: belowH };
+      f.push(`[game0]crop=${even(free.w)}:${even(free.h)}:${Math.round(free.x)}:${Math.round(free.y)},setsar=1[gcrop]`);
+      blurComposite('gcrop', 'gamev', 'g', W, botH);
     }
     f.push(`[camv][gamev]vstack=inputs=2,setsar=1[base]`);
   } else if (baseKind === 'blur' && content) {
@@ -406,6 +423,30 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
     f.push(`[zm${zi}][zz${zi}]overlay=x=0:y=0:enable='${enable}'[zo${zi}]`);
     label = `zo${zi}`;
     zi++;
+  }
+
+  // 3b) Rosto do streamer num círculo (modo "só o rosto"): canto superior direito, com aro branco
+  if (bubble) {
+    const D = even(W * (H > W ? 0.38 : 0.24));
+    const ring = Math.max(4, Math.round(D * 0.035));
+    const R = D / 2 + ring;
+    const bx0 = mapX(bubble.x0) * srcW;
+    const bx1 = mapX(bubble.x1) * srcW;
+    const by0 = mapY(bubble.y0) * srcH;
+    const by1 = mapY(bubble.y1) * srcH;
+    const side = even(Math.min(srcW, srcH, Math.max(bx1 - bx0, by1 - by0)));
+    const sx = Math.round(Math.min(srcW - side, Math.max(0, (bx0 + bx1) / 2 - side / 2)));
+    const sy = Math.round(Math.min(srcH - side, Math.max(0, (by0 + by1) / 2 - side / 2)));
+    const margin = Math.round(W * 0.04);
+    const ox = W - D - 2 * ring - margin;
+    const oy = Math.round(H * 0.04);
+    f.push(
+      `[${srcLabels[branches - 1]}]crop=${side}:${side}:${sx}:${sy},scale=${D}:${D},format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(hypot(X-${D / 2},Y-${D / 2}),${D / 2 - 1}),255,0)'[bub]`,
+    );
+    f.push(`color=c=white:s=${2 * R}x${2 * R}:d=${num(duration + 1)},format=rgba,geq=r=255:g=255:b=255:a='if(lte(hypot(X-${R},Y-${R}),${R - 1}),255,0)'[ring]`);
+    f.push(`[${label}][ring]overlay=x=${ox}:y=${oy}:shortest=1[bring]`);
+    f.push(`[bring][bub]overlay=x=${ox + ring}:y=${oy + ring}[bface]`);
+    label = 'bface';
   }
 
   // 4) Overlays (memes / imagens)

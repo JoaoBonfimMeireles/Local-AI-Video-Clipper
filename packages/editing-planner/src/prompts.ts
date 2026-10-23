@@ -10,6 +10,17 @@ O que faz um corte viralizar é RETENÇÃO: a pessoa assiste até o fim e reassi
    levou à piada, à briga, ao comentário) — um corte que parece "o meio de uma conversa" é um corte ruim;
 3) DESFECHO: a reação, a punchline, a conclusão. Termine logo depois do desfecho, nunca antes.
 Nunca corte uma frase ou ideia ao meio ("mas, aí..." e acaba). Seja crítico: qualidade importa mais que quantidade.
+
+FAIXA DE OURO DOS SHORTS (métrica nº 1: retenção + "escolheram assistir vs. pularam"; o corte não vende nada nem pede inscrição):
+- O corte COMEÇA na palavra mais forte, chocante, curiosa ou polêmica da fala. Nada de saudação, "a gente estava
+  conversando sobre...", apresentação ou enrolação antes do gancho.
+- Escolha UM de dois formatos para cada corte (campo "shortFormat"):
+  • "loop" (15-20s) — pílula rápida: gancho (0-3s) → resposta/entrega em 2-3 frases curtas (3-14s) → fechamento
+    (15-20s) cuja última frase se conecta com a primeira, para o vídeo rodar em loop sem a pessoa perceber onde recomeça.
+  • "story" (20-40s) — gancho de curiosidade (0-4s: o problema ou o resultado inacreditável logo de cara) → conflito/
+    contexto acelerado (4-18s) → clímax/virada (18-32s) → DESFECHO SECO (32-40s): termina logo após o ponto alto,
+    sem "se inscreva", sem despedida, abrupto.
+- Pode juntar trechos distantes para montar o gancho (abrir com a frase forte e depois mostrar o contexto).
 Responda SOMENTE com JSON válido, sem comentários.`;
 
 /** Formatos de shorts que costumam performar bem — a IA usa como repertório, não como lista obrigatória. */
@@ -138,7 +149,8 @@ function buildTwitchSelectionPrompt(args: { knowledge: VideoKnowledge; settings:
       ? QUALITY_QTY
       : `Quantidade: até ${s.maxClips} cortes no total, só os de qualidade.`;
   return `Duração total da live: ${args.videoDuration.toFixed(0)}s.
-Duração desejada por corte: ~${s.targetDuration}s (flexível: entre ${Math.round(s.targetDuration * 0.5)}s e ${Math.round(s.targetDuration * 1.5)}s, somando os trechos).
+Formato do corte: "loop" 15-20s ou "story" 20-40s (duração alvo ~${s.targetDuration}s). Passe de 40s SÓ se for indispensável para a
+história fazer sentido — corte o meio (pausas, repetições, desvios) em vez de alongar.
 ${qty}
 
 Categorias (cada corte pertence a UMA; o ângulo do corte pode ser qualquer formato do repertório abaixo):
@@ -163,6 +175,10 @@ Como um editor de clipes de Twitch:
 - NUNCA termine no meio de um raciocínio, piada ou história: se a pessoa ainda está concluindo, estenda o corte até
   o desfecho (pode passar bem da duração desejada). Começo e fim em frases completas, nunca numa palavra solta.
 - React (streamer assistindo vídeo): o corte precisa mostrar o que ele viu (o trecho do vídeo) E a reação dele.
+  Quando ele COMENTA algo do vídeo ("esqueceu a sopa na panela de pressão...", "olha o que ele fez"), o corte começa
+  ANTES, no trecho do vídeo assistido que mostra/explica aquilo (a pessoa do vídeo contando a situação, a cena da
+  panela) — quem assiste o short precisa entender do que ele está falando antes de ouvir o comentário. Começo
+  (o que estava passando), meio (o que aconteceu) e fim (a reação/piada dele).
 - AÇÃO SEM FALA: se a reação ("nossa, Catalina!", "que isso?!") vem depois de algo que só aparece na imagem (alguém
   jogando sal, caindo, fazendo algo absurdo), o trecho TEM de começar antes, quando a ação começa — mesmo que nesses
   segundos ninguém fale (veja os buracos de tempo na transcrição e o "visual" dos momentos). Sem a ação, a reação não faz sentido.
@@ -170,7 +186,7 @@ Como um editor de clipes de Twitch:
   a sacada, a zoeira com o chat. Um "corte simples" de 10-20s com uma fala ótima também vale.
 
 Retorne JSON exatamente neste formato:
-{"clips":[{"category":"funny","segments":[{"start":812.3,"end":826.0},{"start":1490.2,"end":1502.8}],"score":88,"title":"título curto estilo clipe","reason":"por que é bom (e o que foi pulado, se pulou)","hook":"primeira fala"},
+{"clips":[{"category":"funny","shortFormat":"story","segments":[{"start":812.3,"end":826.0},{"start":1490.2,"end":1502.8}],"score":88,"title":"título curto estilo clipe","reason":"por que é bom (e o que foi pulado, se pulou)","hook":"primeira fala"},
  {"category":"top5","segments":[{"start":300.1,"end":311.0,"label":"O PC travou de novo"},{"start":901.2,"end":913.4,"label":"Neymar na call"}],"score":95,"title":"TOP 5 momentos da live","reason":"...","hook":"..."}]}
 Regras: tempos alinhados ao início/fim de frases (use os tempos dos momentos); cortes não repetem trechos entre si
 (exceto o top5, que pode reaproveitar os melhores momentos); score de 0 a 100.`;
@@ -184,7 +200,8 @@ export function buildSelectionFromKnowledgePrompt(args: { knowledge: VideoKnowle
       ? QUALITY_QTY
       : `Quantidade: proponha até ${Math.min(60, (s.maxClips as number) * 2)} candidatos (serão escolhidos os ${s.maxClips} melhores).`;
   return `Duração total do vídeo: ${args.videoDuration.toFixed(0)}s.
-Duração desejada por corte: ~${s.targetDuration}s (flexível: entre ${Math.round(s.targetDuration * 0.6)}s e ${Math.round(s.targetDuration * 1.5)}s, somando os trechos).
+Formato do corte: "loop" 15-20s ou "story" 20-40s (duração alvo ~${s.targetDuration}s). Passe de 40s SÓ se for indispensável para a
+história fazer sentido — corte o meio (pausas, repetições, desvios) em vez de alongar.
 ${qty}
 
 ${VIRAL_FORMATS}
@@ -201,7 +218,7 @@ do início; ou juntar falas boas espalhadas sobre o mesmo assunto). Cada corte p
 nunca viu o vídeo: gancho nos primeiros 3s, começo-meio-fim, sem depender de contexto ausente.
 
 Retorne JSON exatamente neste formato:
-{"clips":[{"segments":[{"start":120.4,"end":131.0},{"start":12.3,"end":55.8}],"score":87,"title":"título curto e chamativo","reason":"por que funciona (e por que juntou os trechos, se juntou)","hook":"frase de abertura"}]}
+{"clips":[{"shortFormat":"loop","segments":[{"start":120.4,"end":131.0},{"start":12.3,"end":55.8}],"score":87,"title":"título curto e chamativo","reason":"por que funciona (e por que juntou os trechos, se juntou)","hook":"frase de abertura"}]}
 Regras: start/end de cada trecho devem coincidir com início/fim de frases (use os tempos dos momentos); cortes não
 podem repetir trechos entre si; score de 0 a 100.`;
 }
@@ -297,7 +314,7 @@ const ILLUSTRATION_RULES = `ILUSTRAÇÕES ("illustrations") — imagem do que es
 const INTENSITY_RULES: Record<Intensity, string> = {
   low: 'Intensidade BAIXA: cortes limpos. No máximo 1 zoom suave (scale 1.1) por corte, nenhum meme, no máximo 1 efeito sonoro.',
   medium:
-    'Intensidade MÉDIA: zoom pontual (scale 1.15-1.25) a cada ~6-10s em frases de impacto; memes apenas em picos de humor/surpresa (máx. 2 por minuto); sons em momentos de ênfase (máx. 4 por minuto).',
+    'Intensidade MÉDIA (ritmo de Shorts): mude o enquadramento a cada 2,5-3s (alternando zoom in/out, scale 1.1-1.25, ou trocando quem está em quadro) para manter o cérebro ativo; som de "whoosh"/"pop" nas trocas de cena e emendas; memes só em picos de humor/surpresa (máx. 2 por corte).',
   high:
     'Intensidade ALTA: ritmo acelerado. Troque o enquadramento a cada 2-4s (alternando scale 1.12-1.4 e focusX/focusY); muitos memes de reação (até 5 por minuto); efeitos sonoros frequentes (impacto, risadas, transições — até 10 por minuto).',
 };
@@ -385,7 +402,8 @@ Retorne JSON exatamente neste formato:
      : ''
  }
  "emphasisWords":["palavra","chave"],
- "title":"título final do post (máx. 70 caracteres, gancho forte)",
+ "title":"título final do post (MENOS de 50 caracteres, altamente clicável, gancho forte)",
+ "coverText":"texto curto para a capa do Short (3-6 palavras, impacto)",
  "description":"legenda do post: 1-3 frases que geram curiosidade + chamada para ação",
  "hashtags":["#tema","#nicho"]}]}
 Escreva title, description e hashtags no idioma "${args.language}". Use de 5 a 10 hashtags relevantes ao conteúdo (misture amplas e de nicho).

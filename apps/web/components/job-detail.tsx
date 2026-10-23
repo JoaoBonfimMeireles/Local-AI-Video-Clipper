@@ -371,6 +371,59 @@ export function ClipAssets({ metadataPath }: { metadataPath: string }) {
   );
 }
 
+const SUB_LANGS: { code: string; label: string }[] = [
+  { code: 'pt', label: 'Português' },
+  { code: 'en', label: 'Inglês' },
+  { code: 'es', label: 'Espanhol' },
+  { code: 'zh', label: 'Chinês' },
+];
+
+/** Vídeo com legenda em mandarim + legendas (SRT e SBV) nos 4 idiomas, prontas para subir no YouTube. */
+export function LanguageDownloads({ metadataPath }: { metadataPath: string }) {
+  const [files, setFiles] = useState<{ videoZh?: string | null; subtitles?: Record<string, { srt: string; sbv: string }> } | null>(null);
+  useEffect(() => {
+    fetch(fileUrl(metadataPath))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((m) => setFiles(m?.files ?? null))
+      .catch(() => undefined);
+  }, [metadataPath]);
+  if (!files) return null;
+  const dir = metadataPath.replace(/[^\\/]+$/, '');
+  const subs = SUB_LANGS.filter((l) => files.subtitles?.[l.code]);
+  if (!files.videoZh && !subs.length) return null;
+  return (
+    <div className="space-y-1.5 rounded-md border p-2 text-xs">
+      {files.videoZh && (
+        <div className="flex items-center gap-2">
+          <span className="flex-1 font-medium">Vídeo com legenda em mandarim</span>
+          <a className={buttonVariants({ size: 'sm', variant: 'outline' })} href={fileUrl(dir + files.videoZh)} target="_blank" rel="noreferrer">
+            Ver
+          </a>
+          <a className={buttonVariants({ size: 'sm' })} href={fileUrl(dir + files.videoZh, true)}>
+            <Download /> MP4 中文
+          </a>
+        </div>
+      )}
+      {subs.length > 0 && (
+        <div className="space-y-1">
+          <p className="font-medium">Legendas (texto com os tempos, para subir no YouTube)</p>
+          {subs.map((l) => (
+            <div key={l.code} className="flex items-center gap-2">
+              <span className="w-20 text-muted-foreground">{l.label}</span>
+              <a className="text-primary underline-offset-2 hover:underline" href={fileUrl(dir + files.subtitles![l.code].srt, true)}>
+                SRT
+              </a>
+              <a className="text-primary underline-offset-2 hover:underline" href={fileUrl(dir + files.subtitles![l.code].sbv, true)}>
+                SBV
+              </a>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Pedido de ajuste em um corte pronto: refaz só este corte (barato), sem reprocessar o vídeo. */
 export function ReviseBox({ endpoint, onQueued }: { endpoint: string; onQueued: (rev: RevisionStatus) => void }) {
   const [open, setOpen] = useState(false);
@@ -527,6 +580,7 @@ function ClipCard({
         {clip.reason && <p className="line-clamp-3 text-xs text-muted-foreground">{clip.reason}</p>}
         {(clip.description || clip.hashtags.length > 0) && <PostText clip={clip} />}
         {clip.status === 'completed' && clip.metadataPath && <ClipAssets key={clip.metadataPath} metadataPath={clip.metadataPath} />}
+        {clip.status === 'completed' && clip.metadataPath && <LanguageDownloads key={`l${clip.metadataPath}`} metadataPath={clip.metadataPath} />}
         {revision && <RevisionBanner rev={revision} />}
         {clip.status === 'completed' && !revising && <ReviseBox endpoint={`/api/jobs/${clip.jobId}/clips/${clip.index}/revise`} onQueued={onRevise} />}
         {clip.error && <p className="line-clamp-4 text-xs whitespace-pre-wrap text-destructive">{clip.error}</p>}

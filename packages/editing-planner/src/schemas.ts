@@ -37,6 +37,8 @@ export const ClipCandidateSchema = z
     segments: z.array(SegmentSchema).max(8).optional(),
     /** Modo Twitch: categoria do corte (funny, scary, top5...). */
     category: z.string().trim().max(30).optional(),
+    /** Formato da faixa de ouro: "loop" (15-20s, fecha no gancho) ou "story" (20-40s, desfecho seco). */
+    shortFormat: z.enum(['loop', 'story']).nullish().catch(null),
     score: z.coerce.number().finite().min(0).max(100),
     title: cappedText(140, 1),
     reason: cappedText(800).default(''),
@@ -149,6 +151,8 @@ export const ClipEditSchema = z.object({
   title: cappedText(120, 1).optional(),
   /** Legenda/descrição para o post. */
   description: cappedText(1500).optional(),
+  /** Texto curto para a capa (thumbnail) do Short. */
+  coverText: cappedText(80).nullish(),
   hashtags: z
     .array(cappedText(60, 1))
     .max(20)

@@ -6,7 +6,7 @@ import type { Favorite } from '@clipper/shared';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { ClipAssets, PostText, revisionActive, ReviseBox, RevisionBanner, type RevisionStatus } from '@/components/job-detail';
+import { ClipAssets, LanguageDownloads, PostText, revisionActive, ReviseBox, RevisionBanner, type RevisionStatus } from '@/components/job-detail';
 import { api, fileUrl } from '@/lib/client';
 import { cn } from '@/lib/utils';
 
@@ -156,6 +156,7 @@ function FavoriteCard({ fav, revision, onRemove, onRevise }: { fav: Favorite; re
         </p>
         {(fav.description || fav.hashtags.length > 0) && <PostText clip={fav} />}
         <ClipAssets key={fav.metadataPath} metadataPath={fav.metadataPath} />
+        <LanguageDownloads key={`l${fav.metadataPath}`} metadataPath={fav.metadataPath} />
         {revision && <RevisionBanner rev={revision} />}
         {!revising && <ReviseBox endpoint={`/api/favorites/${fav.id}/revise`} onQueued={onRevise} />}
         <div className="flex flex-wrap gap-1.5 pt-1">

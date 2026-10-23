@@ -14,6 +14,19 @@ export interface AssOptions {
   baseline?: number;
   /** Cartões de ranking (Top 5): número grande + título curto, no lado esquerdo, durante cada momento. */
   rankCards?: { at: number; end: number; rank: number; label: string }[];
+  /** Legenda por FRASE já pronta (ex.: tradução para chinês): uma linha por bloco, sem destaque palavra a palavra. */
+  cues?: Cue[];
+  /** Fonte (ex.: "Microsoft YaHei" para chinês). */
+  font?: string;
+  /** Subtítulo do aviso do Top N (padrão "MELHORES MOMENTOS"). */
+  topTitle?: string;
+}
+
+/** Bloco de legenda: um trecho de texto com início e fim. */
+export interface Cue {
+  start: number;
+  end: number;
+  text: string;
 }
 
 const HIGHLIGHT = '&H0000E5FF&'; // amarelo (ASS usa BGR)
@@ -81,7 +94,7 @@ export function buildAss(words: CaptionWord[], opts: AssOptions): string {
   const outline = Math.max(2, Math.round(fontSize * (hormozi ? 0.09 : 0.06)));
   const baseline = opts.baseline ?? (vertical ? 0.72 : 0.9);
   const marginV = Math.round(H * (1 - baseline));
-  const font = hormozi ? 'Arial Black' : 'Arial';
+  const font = opts.font ?? (hormozi ? 'Arial Black' : 'Arial');
   const maxWords = intensity === 'high' ? 3 : intensity === 'medium' ? 4 : 8;
   const maxChars = vertical ? (hormozi ? 22 : 34) : hormozi ? 32 : 48;
 
@@ -101,7 +114,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
   const lines: string[] = [];
-  const chunks = chunkWords(words, maxWords, maxChars);
+  if (opts.cues) {
+    // Frase inteira por bloco (tradução): até 2 linhas; texto sem espaço (chinês) quebra por caracteres
+    for (const cue of opts.cues) {
+      const t = escapeAss(cue.text.trim());
+      if (!t || cue.end - cue.start < 0.05) continue;
+      lines.push(`Dialogue: 0,${assTime(cue.start)},${assTime(cue.end)},Main,,0,0,0,,{\\fad(60,0)}${wrapCaption(t, vertical ? 12 : 22)}`);
+    }
+  }
+  const chunks = opts.cues ? [] : chunkWords(words, maxWords, maxChars);
   for (let c = 0; c < chunks.length; c++) {
     const chunk = chunks[c];
     const nextStart = chunks[c + 1]?.[0].start ?? Infinity;
@@ -138,7 +159,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   if (cards.length) {
     const titleSize = Math.round(fontSize * 0.95);
     lines.push(
-      `Dialogue: 2,${assTime(0)},${assTime(Math.min(2.6, cards[0].end))},Main,,0,0,0,,{\\an8\\pos(${Math.round(W / 2)},${Math.round(H * (vertical ? 0.3 : 0.2))})\\fad(120,200)\\fs${titleSize}\\c${HIGHLIGHT}\\bord${outline + 2}}TOP ${cards.length}{\\c${WHITE}}\\NMELHORES MOMENTOS`,
+      `Dialogue: 2,${assTime(0)},${assTime(Math.min(2.6, cards[0].end))},Main,,0,0,0,,{\\an8\\pos(${Math.round(W / 2)},${Math.round(H * (vertical ? 0.3 : 0.2))})\\fad(120,200)\\fs${titleSize}\\c${HIGHLIGHT}\\bord${outline + 2}}TOP ${cards.length}{\\c${WHITE}}\\N${escapeAss(opts.topTitle ?? 'MELHORES MOMENTOS')}`,
     );
     const rowSize = Math.round(fontSize * (vertical ? 0.52 : 0.45));
     const rowGap = Math.round(rowSize * 1.35);
@@ -159,6 +180,50 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     });
   }
   return header + lines.join('\n') + '\n';
+}
+
+const isCjk = (t: string) => (t.match(/[　-鿿＀-￯]/g) ?? []).length > t.length * 0.4;
+
+/** Quebra a legenda queimada em até 2 linhas: chinês por caracteres, demais idiomas pelo equilíbrio das linhas. */
+function wrapCaption(text: string, maxCjk: number): string {
+  if (!isCjk(text)) return wrapLines(text, Math.round(maxCjk * 2.4)).replace(/\n/g, '\\N');
+  if (text.length <= maxCjk) return text;
+  const half = Math.ceil(text.length / 2);
+  return `${text.slice(0, half)}\\N${text.slice(half)}`;
+}
+
+/** Blocos de legenda (para SRT/SBV e tradução): até ~84 caracteres, quebrando em pausas e pontuação. */
+export function captionCues(words: TranscriptWord[]): Cue[] {
+  return chunkWords(words, 14, 84, 0.9).map((chunk) => ({ start: chunk[0].start, end: chunk[chunk.length - 1].end, text: chunk.map((w) => cleanWord(w.word)).join(' ') }));
+}
+
+const cueText = (t: string) => (isCjk(t) ? (t.length > 18 ? `${t.slice(0, Math.ceil(t.length / 2))}\n${t.slice(Math.ceil(t.length / 2))}` : t) : wrapLines(t, 42));
+
+/** SRT a partir de blocos prontos (qualquer idioma). Tempos "00:01:05,250 --> 00:01:08,000". */
+export function buildSrtFromCues(cues: Cue[]): string {
+  return cues
+    .filter((c) => c.text.trim())
+    .map((c, i) => `${i + 1}\n${srtTime(c.start)} --> ${srtTime(c.end)}\n${cueText(c.text.trim())}\n`)
+    .join('\n');
+}
+
+function sbvTime(t: number): string {
+  const ms = Math.max(0, Math.round(t * 1000));
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}`;
+}
+
+/**
+ * SBV (SubViewer, aceito pelo YouTube Studio): cada bloco é "H:MM:SS.mmm,H:MM:SS.mmm" (hora:minuto:segundo,
+ * sem espaços), o texto na linha seguinte e uma linha em branco entre blocos. UTF-8 simples, sem marcações.
+ */
+export function buildSbv(cues: Cue[]): string {
+  return cues
+    .filter((c) => c.text.trim())
+    .map((c) => `${sbvTime(c.start)},${sbvTime(c.end)}\n${cueText(c.text.trim())}\n`)
+    .join('\n');
 }
 
 /** SRT com blocos de até ~42 caracteres por linha (2 linhas). */

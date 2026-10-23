@@ -55,8 +55,17 @@ export async function POST(req: Request) {
     copy(path.join(job.result.outputDir, 'transcript.json'), 'transcript.json');
     // Metadados apontando para os arquivos da cópia
     const meta = JSON.parse(fs.readFileSync(clip.metadataPath, 'utf8'));
+    // Versão com legenda em mandarim e legendas nos 4 idiomas (SRT/SBV)
+    const srcDir = path.dirname(clip.metadataPath);
+    const videoZh = meta.files?.videoZh ? (copy(path.join(srcDir, meta.files.videoZh), 'clip.zh.mp4') ? 'clip.zh.mp4' : null) : null;
+    const subtitles: Record<string, { srt: string; sbv: string }> = {};
+    for (const [lang, f] of Object.entries((meta.files?.subtitles ?? {}) as Record<string, { srt: string; sbv: string }>)) {
+      const srt = copy(path.join(srcDir, f.srt), `clip.${lang}.srt`);
+      const sbv = copy(path.join(srcDir, f.sbv), `clip.${lang}.sbv`);
+      if (srt && sbv) subtitles[lang] = { srt: path.basename(srt), sbv: path.basename(sbv) };
+    }
     meta.favorite = { id, jobId, clipIndex, videoName: job.videoName, favoritedAt: new Date().toISOString() };
-    meta.files = { ...(meta.files ?? {}), video: 'clip.mp4', thumbnail: 'clip.jpg', srt: srtPath ? { [Object.keys(meta.files?.srt ?? { pt: '' })[0]]: 'clip.srt' } : {} };
+    meta.files = { ...(meta.files ?? {}), video: 'clip.mp4', videoZh, thumbnail: 'clip.jpg', srt: srtPath ? { [Object.keys(meta.files?.srt ?? { pt: '' })[0]]: 'clip.srt' } : {}, subtitles };
     const metadataPath = path.join(dir, 'clip.json');
     fs.writeFileSync(metadataPath, JSON.stringify(meta, null, 2), 'utf8');
     const favorite = insertFavorite({

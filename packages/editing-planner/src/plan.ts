@@ -7,7 +7,8 @@ import { findAssetsByKeywords, matchAssetByName } from './library-select';
 
 const LIMITS: Record<Intensity, { zoomsPerMin: number; memesPerMin: number; sfxPerMin: number; minZoomGap: number }> = {
   low: { zoomsPerMin: 1, memesPerMin: 0, sfxPerMin: 1, minZoomGap: 15 },
-  medium: { zoomsPerMin: 8, memesPerMin: 2, sfxPerMin: 4, minZoomGap: 4 },
+  // Média segue o ritmo de Shorts: troca de enquadramento a cada ~3s
+  medium: { zoomsPerMin: 16, memesPerMin: 2, sfxPerMin: 4, minZoomGap: 3 },
   high: { zoomsPerMin: 24, memesPerMin: 5, sfxPerMin: 10, minZoomGap: 1.5 },
 };
 
@@ -63,6 +64,7 @@ export function normalizeEdit(edit: ClipEdit, duration: number, settings: JobSet
     emphasisWords: edit.emphasisWords.slice(0, 60),
     title: edit.title,
     description: edit.description,
+    coverText: edit.coverText ?? null,
     hashtags: edit.hashtags ?? [],
   };
 }
@@ -293,6 +295,8 @@ export interface ClipLayout {
   gameplay: boolean;
   /** Área do conteúdo que se mexe (react: o vídeo assistido), sem a facecam nem molduras. */
   content?: { x0: number; y0: number; x1: number; y1: number } | null;
+  /** Modo "só o rosto": área do rosto mostrada num círculo no canto superior, sobre o conteúdo. */
+  bubble?: { x0: number; y0: number; x1: number; y1: number } | null;
 }
 
 export interface ResolvedEdit {
@@ -307,6 +311,8 @@ export interface ResolvedEdit {
   emphasisWords: string[];
   title?: string;
   description?: string;
+  /** Texto curto sugerido para a capa do Short. */
+  coverText?: string | null;
   hashtags: string[];
   warnings: string[];
 }
@@ -364,6 +370,7 @@ export function resolveEdit(edit: ClipEdit, library: LibraryIndex, seed: string)
     emphasisWords: edit.emphasisWords,
     title: edit.title,
     description: edit.description,
+    coverText: edit.coverText ?? null,
     hashtags: edit.hashtags ?? [],
     warnings,
   };

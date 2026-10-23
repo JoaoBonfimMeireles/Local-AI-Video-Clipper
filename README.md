@@ -133,10 +133,52 @@ No formulário, escolha **Live da Twitch**. Muda o olhar da IA e a edição:
 - **Layout facecam + jogo:** se houver facecam fixa num canto (detectada automaticamente), o vertical vira câmera em
   cima e jogo embaixo, com a legenda na emenda. Em **react**, a área do vídeo assistido é detectada pelo movimento e vai
   inteira embaixo, sem nenhum pedaço da câmera. Para IRL/sem facecam, usa o enquadramento por pessoas.
+  - **Câmera do streamer sempre inteira:** o retângulo exato da facecam (em qualquer canto, e o layout pode mudar
+    durante a live) é medido em cada corte pela moldura fixa em volta do rosto; ela ocupa toda a largura do topo, na
+    proporção da própria câmera — sem faixa vazia e sem cortar a pessoa.
+  - **Só o vídeo assistido:** em react de post do Instagram/Facebook/YouTube, o player é encontrado (região que muda,
+    encaixada nas bordas fixas) e só ele aparece embaixo, ampliado e centralizado — sem página, comentários ou espaço
+    em branco. Sem player claro, o conteúdo aparece inteiro com desfoque nas sobras (nunca um zoom exagerado).
 - **Memes green screen** (ex.: Green Screen Memes): vídeos com fundo verde são detectados e recortados (chroma key) por
   cima do vídeo; memes com áudio entram na mixagem e o som da live abaixa enquanto tocam. Sons (ex.: myinstants) vão em
   `data/audio/<categoria>`. A IA recebe duração, áudio e fundo verde de cada arquivo da biblioteca.
 - O cache de conhecimento do modo Twitch é separado do modo YouTube (análises diferentes do mesmo arquivo).
+
+### Painel do vídeo (trecho e áreas marcadas à mão)
+
+Ao escolher o vídeo, o formulário mostra um player para assistir tudo e:
+
+- **Marcar o trecho** (início/fim) em que a IA deve procurar os cortes — ela só analisa e só corta dentro dele.
+- **Desenhar a câmera do streamer**: retângulo, ou círculo no rosto com duas opções — *expandir* até o quadradinho
+  inteiro (ocupa o topo) ou *só o rosto* num círculo com aro branco no canto superior, sobre o conteúdo em tela cheia.
+- **Desenhar a área do conteúdo** do react.
+- **Acompanhar**: com a chave ligada, a IA ajusta perto do que foi marcado se a pessoa ou o player mudarem de lugar
+  (em cada corte); desligada, usa exatamente a área desenhada.
+
+Lives baixadas da Twitch costumam vir em MPEG-TS com extensão .mp4 (o navegador não toca): na primeira vez o app
+gera uma versão leve de prévia (360p, em `data/cache/previews`) — alguns minutos para 1h de live; depois é imediato.
+O corte final sempre usa o vídeo original.
+
+### Faixa de ouro dos Shorts
+
+A duração padrão é 25s e a IA escolhe, para cada corte, um de dois formatos: **loop** (15-20s: gancho → entrega →
+frase final que se conecta com a primeira) ou **story** (20-40s: gancho de curiosidade → conflito acelerado →
+clímax → desfecho seco, sem "se inscreva"). O corte começa na palavra mais forte (sem saudação), a intensidade média
+troca o enquadramento a cada ~3s com whoosh/pop nas emendas, e o título tem menos de 50 caracteres; o metadata do
+corte traz `shortFormat` e `coverText` (texto sugerido para a capa).
+
+### Versão em mandarim e legendas em 4 idiomas
+
+Todo corte com legenda queimada ganha também `clip_NNN.zh.mp4`: a mesma edição (enquadramento, memes, sons, pausas),
+só que com a legenda em **chinês simplificado**. Além disso, cada corte exporta as legendas em **português, inglês,
+espanhol e chinês**, nos formatos aceitos pelo YouTube Studio:
+
+- **SBV** (`clip_NNN.pt.sbv`…): `0:01:05.250,0:01:08.000` + texto (hora:minuto:segundo.milissegundo);
+- **SRT** (`clip_NNN.pt.srt`…): `00:01:05,250 --> 00:01:08,000` + texto.
+
+Os tempos já consideram as pausas dos efeitos sonoros. A tradução é por bloco de legenda, uma chamada por idioma para
+todos os cortes (barata, em cache). No card do corte (e nos Favoritos) aparecem o botão **MP4 中文** e os links SRT/SBV
+de cada idioma. Sem provedor de IA, só o idioma original é exportado.
 
 ### Favoritos
 
