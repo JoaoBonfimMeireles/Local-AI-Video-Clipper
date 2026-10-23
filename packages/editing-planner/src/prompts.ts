@@ -50,11 +50,18 @@ em voz alta), as piadas internas, os sustos, as zoeiras e as interações com vi
 clipes. Esta análise será guardada e reutilizada para cortes diferentes: seja completo e preciso nos tempos.
 Escreva as descrições em português. Responda SOMENTE com JSON válido, sem comentários.`;
 
-export function buildAnalysisPrompt(args: { transcriptText: string; videoDuration: number; visualNotes?: string; chunkInfo?: string; mode?: 'youtube' | 'twitch'; audioPeaks?: string; activeWindows?: string }): string {
+const SILENT_RULE = (gaps?: string) =>
+  gaps
+    ? `Trechos SEM FALA (a ação acontece só na imagem — olhe as imagens desses tempos e descreva o que a pessoa FAZ): ${gaps}
+Muitas vezes a reação falada ("que isso!", "nossa, Fulana!") vem DEPOIS de uma ação silenciosa: registre a ação como
+parte do mesmo momento (o momento começa quando a ação começa, não quando alguém fala).\n`
+    : '';
+
+export function buildAnalysisPrompt(args: { transcriptText: string; videoDuration: number; visualNotes?: string; chunkInfo?: string; mode?: 'youtube' | 'twitch'; audioPeaks?: string; activeWindows?: string; silentGaps?: string }): string {
   if (args.mode === 'twitch') return buildTwitchAnalysisPrompt(args);
   return `Vídeo com duração total de ${formatTimestamp(args.videoDuration)} (${args.videoDuration.toFixed(0)}s).
 ${args.chunkInfo ?? ''}
-${args.visualNotes ? `Frames amostrados (as imagens anexadas seguem esta ordem):\n${args.visualNotes}\n` : ''}
+${args.visualNotes ? `Frames amostrados (as imagens anexadas seguem esta ordem):\n${args.visualNotes}\n` : ''}${SILENT_RULE(args.silentGaps)}
 Transcrição com timestamps (segundos absolutos):
 ${args.transcriptText}
 
@@ -70,12 +77,12 @@ Regras: moments deve cobrir o vídeo INTEIRO em blocos de 5 a 40s, sem lacunas g
 início/fim de frases; strength (0-100) = potencial para viralizar isoladamente; position com x aproximado (0=esquerda, 1=direita).`;
 }
 
-function buildTwitchAnalysisPrompt(args: { transcriptText: string; videoDuration: number; visualNotes?: string; chunkInfo?: string; audioPeaks?: string; activeWindows?: string }): string {
+function buildTwitchAnalysisPrompt(args: { transcriptText: string; videoDuration: number; visualNotes?: string; chunkInfo?: string; audioPeaks?: string; activeWindows?: string; silentGaps?: string }): string {
   const minMoments = Math.max(12, Math.round(args.videoDuration / 30));
   return `Live (VOD) com duração total de ${formatTimestamp(args.videoDuration)} (${args.videoDuration.toFixed(0)}s).
 ${args.chunkInfo ?? ''}
 ${args.visualNotes ? `Frames amostrados (as imagens anexadas seguem esta ordem):\n${args.visualNotes}\n` : ''}
-${args.audioPeaks ? `Picos de volume no áudio (gritos, risadas, sustos, euforia — ótimos candidatos a clipe): ${args.audioPeaks}\n` : ''}${args.activeWindows ? `Trechos mais agitados (muita ação na tela + áudio alto): ${args.activeWindows}\n` : ''}
+${SILENT_RULE(args.silentGaps)}${args.audioPeaks ? `Picos de volume no áudio (gritos, risadas, sustos, euforia — ótimos candidatos a clipe): ${args.audioPeaks}\n` : ''}${args.activeWindows ? `Trechos mais agitados (muita ação na tela + áudio alto): ${args.activeWindows}\n` : ''}
 Transcrição com timestamps (segundos absolutos):
 ${args.transcriptText}
 
@@ -156,6 +163,9 @@ Como um editor de clipes de Twitch:
 - NUNCA termine no meio de um raciocínio, piada ou história: se a pessoa ainda está concluindo, estenda o corte até
   o desfecho (pode passar bem da duração desejada). Começo e fim em frases completas, nunca numa palavra solta.
 - React (streamer assistindo vídeo): o corte precisa mostrar o que ele viu (o trecho do vídeo) E a reação dele.
+- AÇÃO SEM FALA: se a reação ("nossa, Catalina!", "que isso?!") vem depois de algo que só aparece na imagem (alguém
+  jogando sal, caindo, fazendo algo absurdo), o trecho TEM de começar antes, quando a ação começa — mesmo que nesses
+  segundos ninguém fale (veja os buracos de tempo na transcrição e o "visual" dos momentos). Sem a ação, a reação não faz sentido.
 - Pense como editor de clipes: prefira os trechos mais agitados (picos de volume, muita ação), o comentário certeiro,
   a sacada, a zoeira com o chat. Um "corte simples" de 10-20s com uma fala ótima também vale.
 

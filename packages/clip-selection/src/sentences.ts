@@ -72,7 +72,11 @@ export function snapToSentences(start: number, end: number, sentences: Sentence[
     if (!next || next.end > limit) break;
     e = next;
   }
-  const startT = Math.max(0, s.start - 0.15);
+  // Pedido começa num trecho SEM fala antes da frase (ação só visual: alguém jogando sal, caindo...):
+  // mantém o começo pedido em vez de pular para a fala — senão o corte mostra a reação sem a ação
+  const prevEnd = sentences[sentences.indexOf(s) - 1]?.end ?? 0;
+  const silentLead = start < s.start - 0.5 && start >= prevEnd - 0.2 && s.start - start <= 25;
+  const startT = silentLead ? Math.max(0, start) : Math.max(0, s.start - 0.15);
   const endT = Math.min(videoDuration, e.end + Math.min(0.4, e.gapAfter * 0.6));
   return { start: round3(startT), end: round3(Math.max(endT, startT + 1)) };
 }

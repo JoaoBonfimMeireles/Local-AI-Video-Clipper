@@ -10,6 +10,7 @@ import {
   detectFaces,
   detectSubtitleRegion,
   estimateCostUsd,
+  silentGaps,
   type DetectedFace,
   transcribe,
   translateSegments,
@@ -211,7 +212,15 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
     detectSceneChanges(job.inputPath, { signal, duration: info.duration, onProgress: (p) => progress('frames', p * 0.7) }),
   );
   const frames = await cached<ExtractedFrame[]>('frames.json', async () => {
-    const times = pickFrameTimes(info.duration, { scenes, peaks: findEnergyPeaks(energy), silenceEnds: silences.map((x) => x.end) }, 24);
+    // IA paga enxerga bem mais: ~1 imagem a cada 6s (24 a 72), e sempre imagens DENTRO dos trechos sem fala,
+    // onde a ação é só visual (alguém fazendo algo que gera a reação logo depois)
+    const paidVision = app.sendFramesToAI && (app.aiProvider === 'anthropic' || (app.aiProvider === 'gemini' && app.geminiPlan !== 'free'));
+    const maxFrames = paidVision ? Math.min(72, Math.max(24, Math.round(info.duration / 6))) : 24;
+    const gapPoints = silentGaps(transcript).flatMap((g) => {
+      const n = Math.max(1, Math.min(4, Math.floor((g.end - g.start) / 4)));
+      return Array.from({ length: n }, (_, i) => g.start + ((i + 0.5) * (g.end - g.start)) / n);
+    });
+    const times = pickFrameTimes(info.duration, { scenes: [...scenes, ...gapPoints].sort((x, y) => x - y), peaks: findEnergyPeaks(energy), silenceEnds: silences.map((x) => x.end) }, maxFrames);
     return extractFrames(job.inputPath, times, usableDir(path.join(tempDir, 'frames')), { signal, onProgress: (p) => progress('frames', 0.7 + p * 0.3) });
   });
   log('info', `${scenes.length} trocas de cena detectadas; ${frames.length} frames extraídos`);
@@ -271,7 +280,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
     // A análise de live (Twitch) tem outro olhar e outras categorias: cache separado por modo
     // v2: análise de live mais densa (≈1 momento/30s) e com picos de volume — invalida análises antigas mais rasas
     // Análise feita por modelo gratuito/limitado fica separada: com IA paga o vídeo é reanalisado com mais qualidade
-    const kFile = `${cacheBase}.knowledge${s.mode === 'twitch' ? '-twitch-v2' : ''}${llm.free ? '-free' : ''}.json`;
+    const kFile = `${cacheBase}.knowledge${s.mode === 'twitch' ? '-twitch-v3' : ''}${llm.free ? '-free' : ''}.json`;
     if (fs.existsSync(kFile)) {
       knowledge = JSON.parse(fs.readFileSync(kFile, 'utf8')) as VideoKnowledge;
       log('info', `Conhecimento do vídeo reaproveitado do cache (${knowledge.moments.length} momentos) — sem reenviar transcrição e frames`);
@@ -401,6 +410,9 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
     }
     fs.writeFileSync(path.join(tempDir, 'candidates.json'), JSON.stringify(candidates));
     const picked = selectClips(candidates, { maxClips: s.maxClips, videoDuration: info.duration, targetDuration: s.targetDuration, minScore: llm ? 70 : 55 });
+    for (const c of candidates.filter((x) => !picked.includes(x))) {
+      log('info', `Candidato não usado: "${c.title}" (nota ${Math.round(c.score)}${c.score < (llm ? 70 : 55) ? ', abaixo da nota mínima' : ', repete trechos de um corte melhor'})`);
+    }
     return picked.map((c, index) => ({ ...c, segments: segmentsOf(c), index }));
   });
   if (!selected.length) throw new Error('Nenhum corte selecionado.');
@@ -480,7 +492,14 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       const v = visual.get(c.index)!;
       // Facecam presente em metade dos frames do corte já é fixa (o detector de rosto falha quando a pessoa
       // se mexe, põe a mão no rosto, usa chapéu...); a da live inteira vale como reserva
-      const cam = verticalOut && s.twitchLayout !== 'full' ? detectFacecam(v.frames.map((f) => f.faces), 0.5) ?? splitLayout?.cam ?? null : null;
+      // A facecam da live inteira só vale se o rosto aparece mesmo nela em boa parte DESTE corte
+      // (num corte em que o streamer levantou e está de câmera cheia, não existe facecam)
+      const inBox = (b: { x0: number; y0: number; x1: number; y1: number }) =>
+        v.frames.filter((f) => f.faces.some((x) => x.x >= b.x0 && x.x <= b.x1 && x.y >= b.y0 && x.y <= b.y1)).length / Math.max(1, v.frames.length);
+      const cam =
+        verticalOut && s.twitchLayout !== 'full'
+          ? detectFacecam(v.frames.map((f) => f.faces), 0.5) ?? (splitLayout && (s.twitchLayout === 'split' || inBox(splitLayout.cam) >= 0.35) ? splitLayout.cam : null)
+          : null;
       // Pessoa na câmera cheia (rosto grande, ou de corpo inteiro em boa parte do corte) → enquadramento por pessoa
       const bigFace = v.frames.some((f) => f.faces.some((x) => x.w > 0.15)) || (!cam && v.frames.filter((f) => f.faces.some((x) => x.w > 0.04)).length >= v.frames.length * 0.4);
       // Onde está o conteúdo que se mexe (react: o vídeo assistido) — sem a facecam e sem molduras paradas

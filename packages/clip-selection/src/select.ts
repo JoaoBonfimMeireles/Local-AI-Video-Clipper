@@ -28,7 +28,8 @@ function overlap(a: ClipCandidate, b: ClipCandidate): number {
 
 /** Seleção gulosa por nota, eliminando cortes redundantes (sobrepostos) — estilo NMS. */
 export function selectClips<T extends ClipCandidate>(candidates: T[], opts: SelectOptions): T[] {
-  const maxOverlap = opts.maxOverlap ?? 0.04;
+  // Uns segundos em comum (gancho, contexto) não fazem dois cortes serem o mesmo; só descarta repetição de verdade
+  const maxOverlap = opts.maxOverlap ?? 0.2;
   const sorted = [...candidates]
     .filter((c) => clipDuration(c) >= 3 && Number.isFinite(c.score))
     .sort((a, b) => b.score - a.score);

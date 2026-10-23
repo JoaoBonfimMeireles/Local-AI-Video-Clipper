@@ -216,9 +216,14 @@ export async function aiAnalyzeVideo(args: {
   const parts: VideoKnowledge[] = [];
   for (let c = 0; c < chunks.length; c++) {
     const chunk = chunks[c];
-    const frames = (args.frames ?? []).filter((f) => f.time >= chunk.from && f.time <= chunk.to);
     const useImages = args.sendImages && args.llm.supportsImages;
+    // As imagens enviadas e a lista descrita têm de ser AS MESMAS, espalhadas pelo bloco inteiro
+    // (antes só as 12 primeiras iam e o fim do vídeo ficava sem imagem)
+    const all = (args.frames ?? []).filter((f) => f.time >= chunk.from && f.time <= chunk.to);
+    const cap = args.llm.free ? 12 : 72;
+    const frames = all.length <= cap ? all : Array.from({ length: cap }, (_, i) => all[Math.floor((i * all.length) / cap)]);
     const visualNotes = frames.length ? frames.map((f, i) => `imagem ${i + 1}: t=${f.time.toFixed(1)}s (${f.reason})`).join('\n') : undefined;
+    const gaps = silentGaps(args.transcript, chunk.from, chunk.to);
     parts.push(
       await askJson(
         args.llm,
@@ -231,9 +236,10 @@ export async function aiAnalyzeVideo(args: {
             transcriptText: chunk.text,
             videoDuration: args.videoDuration,
             visualNotes: useImages ? visualNotes : undefined,
+            silentGaps: gaps.length ? gaps.map((g) => `${g.start.toFixed(0)}-${g.end.toFixed(0)}s`).join(', ') : undefined,
             chunkInfo: chunks.length > 1 ? `Este é o bloco ${c + 1}/${chunks.length} (de ${chunk.from.toFixed(0)}s a ${chunk.to.toFixed(0)}s).` : '',
           }),
-          images: useImages ? frames.slice(0, 12).map((f) => imageFromFile(f.path)) : undefined,
+          images: useImages ? frames.map((f) => imageFromFile(f.path)) : undefined,
           maxTokens: 32768,
           signal: args.signal,
         },
@@ -293,6 +299,18 @@ export async function aiSelectFromKnowledge(args: {
     hook: x.hook,
     category: x.category,
   }));
+}
+
+/** Trechos de 4s+ sem nenhuma fala: ali a história anda só pela imagem (alguém faz algo, a cena muda). */
+export function silentGaps(t: Transcript, from = 0, to = Infinity): { start: number; end: number }[] {
+  const segs = t.segments.filter((s) => s.end > from && s.start < to);
+  const out: { start: number; end: number }[] = [];
+  let prev = Math.max(0, from);
+  for (const s of segs) {
+    if (s.start - prev >= 4) out.push({ start: prev, end: s.start });
+    prev = Math.max(prev, s.end);
+  }
+  return out;
 }
 
 /** Texto com tempos relativos agrupado em frases de ~8 palavras: "[3.2] palavras ...". */
