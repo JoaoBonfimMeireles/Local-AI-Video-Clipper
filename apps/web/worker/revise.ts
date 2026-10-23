@@ -196,6 +196,7 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
     split: ctx.layout?.cam ? { cam: ctx.layout.cam } : null,
     content: ctx.layout?.content ?? null,
     bubble: ctx.layout?.bubble ?? null,
+    contentPhases: ctx.layout?.contentPhases ?? null,
     zooms: resolved.zooms,
     overlays: resolved.overlays.map((o) => {
       const inf = memeInfo.get(o.file);

@@ -297,6 +297,8 @@ export interface ClipLayout {
   content?: { x0: number; y0: number; x1: number; y1: number } | null;
   /** Modo "só o rosto": área do rosto mostrada num círculo no canto superior, sobre o conteúdo. */
   bubble?: { x0: number; y0: number; x1: number; y1: number } | null;
+  /** Trechos do corte em que o conteúdo do react muda de lugar/tamanho (ex.: tela cheia). */
+  contentPhases?: { at: number; end: number; box: { x0: number; y0: number; x1: number; y1: number } }[];
 }
 
 export interface ResolvedEdit {

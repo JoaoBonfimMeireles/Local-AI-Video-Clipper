@@ -151,7 +151,10 @@ Ao escolher o vídeo, o formulário mostra um player para assistir tudo e:
 - **Marcar o trecho** (início/fim) em que a IA deve procurar os cortes — ela só analisa e só corta dentro dele.
 - **Desenhar a câmera do streamer**: retângulo, ou círculo no rosto com duas opções — *expandir* até o quadradinho
   inteiro (ocupa o topo) ou *só o rosto* num círculo com aro branco no canto superior, sobre o conteúdo em tela cheia.
-- **Desenhar a área do conteúdo** do react.
+- **Desenhar a área do conteúdo** do react. Com **dinâmico** ligado, a IA foca nesse player e analisa cada corte em
+  janelas de ~4s: se o conteúdo crescer bem além da área marcada (o streamer pôs o vídeo em tela cheia), o
+  enquadramento passa para a área nova naquele trecho e volta ao quadradinho depois. Trocas de menos de ~8s são
+  ignoradas, para não ficar piscando.
 - **Acompanhar**: com a chave ligada, a IA ajusta perto do que foi marcado se a pessoa ou o player mudarem de lugar
   (em cada corte); desligada, usa exatamente a área desenhada.
 

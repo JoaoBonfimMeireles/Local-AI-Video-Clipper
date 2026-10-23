@@ -871,6 +871,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         split: edit.layout?.cam ? { cam: edit.layout.cam } : null,
         content: edit.layout?.content ?? null,
         bubble: edit.layout?.bubble ?? null,
+        contentPhases: edit.layout?.contentPhases ?? null,
         zooms: edit.zooms,
         overlays: edit.overlays.map((o) => {
           const inf = assetInfo.get(o.file);

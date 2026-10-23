@@ -37,7 +37,7 @@ function followFace(box: FrameBox, frames: { faces: DetectedFace[] }[]): { box: 
 
 export async function manualClipLayout(
   m: ManualLayout,
-  frames: { path: string; faces: DetectedFace[] }[],
+  frames: { path: string; faces: DetectedFace[]; time?: number }[],
   signal?: AbortSignal,
 ): Promise<{ layout: ClipLayout; note: string }> {
   const paths = frames.map((f) => f.path);
@@ -89,5 +89,50 @@ export async function manualClipLayout(
       }
     }
   }
-  return { layout: { cam, gameplay: !cam, content, bubble }, note: notes.join(', ') };
+  // Conteúdo dinâmico: em janelas de ~4s, vê se o conteúdo saiu do quadradinho e tomou a tela (o streamer pôs o
+  // vídeo em tela cheia, abriu outra janela...). Nesses trechos o enquadramento passa para a área nova.
+  let contentPhases: { at: number; end: number; box: FrameBox }[] = [];
+  if (m.content?.track && content) {
+    const camArea = cam ?? (bubble ? grow(bubble, 0.6) : null);
+    contentPhases = await detectContentPhases(frames, content, camArea, signal);
+    if (contentPhases.length) notes.push(`conteúdo em tela cheia em ${contentPhases.map((p) => `${p.at.toFixed(0)}–${p.end.toFixed(0)}s`).join(', ')}`);
+  }
+  return { layout: { cam, gameplay: !cam, content, bubble, contentPhases }, note: notes.join(', ') };
+}
+
+/** Janelas do corte em que o conteúdo ficou bem maior que a área marcada (tela cheia), já agrupadas. */
+async function detectContentPhases(
+  frames: { path: string; time?: number }[],
+  marked: FrameBox,
+  camArea: FrameBox | null,
+  signal?: AbortSignal,
+): Promise<{ at: number; end: number; box: FrameBox }[]> {
+  const WIN = 4;
+  const timed = frames.map((f, i) => ({ ...f, t: f.time ?? i }));
+  if (timed.length < 8) return [];
+  const last = timed[timed.length - 1].t;
+  const wins: { at: number; end: number; box: FrameBox | null }[] = [];
+  for (let at = 0; at <= last; at += WIN) {
+    const inWin = timed.filter((f) => f.t >= at && f.t < at + WIN);
+    if (inWin.length < 3) continue;
+    const p = await detectPlayerBox(inWin.map((f) => f.path), camArea, signal);
+    // "Tela cheia": a região que se mexe cresceu bem além da área marcada (≥1,3x maior e ≥30% dela fora da marcação)
+    const big = !!p && area(p.box) >= 1.3 * area(marked) && area(p.box) - area(inter(p.box, marked)) >= 0.3 * area(p.box);
+    wins.push({ at, end: Math.min(last + 1, at + WIN), box: big ? p!.box : null });
+  }
+  // Agrupa janelas seguidas de tela cheia; trechos de uma janela só (≈4s) são ignorados (troca rápida demais)
+  const phases: { at: number; end: number; box: FrameBox }[] = [];
+  for (let i = 0; i < wins.length; i++) {
+    if (!wins[i].box) continue;
+    let j = i;
+    while (j + 1 < wins.length && wins[j + 1].box) j++;
+    if (j > i) {
+      const boxes = wins.slice(i, j + 1).map((w) => w.box!);
+      // Caixa que cobre o conteúdo nas janelas do grupo (mediana de cada borda)
+      const med = (k: keyof FrameBox) => boxes.map((b) => b[k]).sort((a, b) => a - b)[Math.floor(boxes.length / 2)];
+      phases.push({ at: wins[i].at, end: wins[j].end, box: { x0: med('x0'), y0: med('y0'), x1: med('x1'), y1: med('y1') } });
+    }
+    i = j;
+  }
+  return phases;
 }

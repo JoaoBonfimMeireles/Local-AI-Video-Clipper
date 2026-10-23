@@ -245,8 +245,11 @@ export function RegionSelector({
           <div className="rounded-md border bg-background/50 p-2 text-xs">
             <label className="flex cursor-pointer items-center justify-between gap-3">
               <span>
-                <span className="font-medium text-amber-400">Conteúdo do react</span> — ajustar automaticamente
-                <span className="block text-muted-foreground">A IA encaixa no player do vídeo perto da área marcada, se ele mudar de lugar; desligado, usa exatamente a área.</span>
+                <span className="font-medium text-amber-400">Conteúdo do react</span> — dinâmico
+                <span className="block text-muted-foreground">
+                  A IA foca no player marcado e acompanha as mudanças: se ele mudar de lugar, ou se o streamer puser o vídeo em tela cheia, o enquadramento muda junto (e volta quando o
+                  conteúdo voltar ao quadradinho). Desligado, usa sempre exatamente a área desenhada.
+                </span>
               </span>
               <Switch checked={content.track} onCheckedChange={(v) => update({ content: { ...content, track: v } })} />
             </label>

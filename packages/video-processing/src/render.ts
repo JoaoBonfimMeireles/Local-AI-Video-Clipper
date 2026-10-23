@@ -76,6 +76,11 @@ export interface RenderSpec {
    * no quadro original (frações: x0, y0, x1, y1). game = centro horizontal do jogo (0-1).
    */
   split?: { cam: { x0: number; y0: number; x1: number; y1: number }; gameX?: number; camRatio?: number } | null;
+  /**
+   * Conteúdo do react que MUDA ao longo do corte (ex.: o streamer põe o vídeo em tela cheia): em cada janela
+   * [at, end) do corte, mostra esta área no lugar de `content`.
+   */
+  contentPhases?: { at: number; end: number; box: { x0: number; y0: number; x1: number; y1: number } }[] | null;
   /** Rosto do streamer num círculo no canto superior, por cima do conteúdo (área do rosto no quadro original). */
   bubble?: { x0: number; y0: number; x1: number; y1: number } | null;
   /** Efeitos sonoros com o vídeo pausado (congelado) enquanto tocam — não atropelam a fala. */
@@ -290,15 +295,36 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
 
   const baseIn = srcLabels[next++];
   // Retângulo do conteúdo em pixels da fonte (mesmo mapeamento da facecam)
-  const content = spec.content
-    ? (() => {
-        const x = Math.max(0, Math.round(mapX(spec.content.x0) * srcW));
-        const y = Math.max(0, Math.round(mapY(spec.content.y0) * srcH));
-        const w = even(Math.min(srcW - x, mapX(spec.content.x1) * srcW - x));
-        const h = even(Math.min(srcH - y, mapY(spec.content.y1) * srcH - y));
-        return w > 32 && h > 32 ? { x, y, w, h } : null;
-      })()
-    : null;
+  const pxBox = (b: { x0: number; y0: number; x1: number; y1: number }) => {
+    const x = Math.max(0, Math.round(mapX(b.x0) * srcW));
+    const y = Math.max(0, Math.round(mapY(b.y0) * srcH));
+    const w = even(Math.min(srcW - x, mapX(b.x1) * srcW - x));
+    const h = even(Math.min(srcH - y, mapY(b.y1) * srcH - y));
+    return w > 32 && h > 32 ? { x, y, w, h } : null;
+  };
+  const content = spec.content ? pxBox(spec.content) : null;
+  // Fases em que o conteúdo muda de lugar/tamanho (quadradinho ↔ tela cheia)
+  const phases = (spec.contentPhases ?? [])
+    .filter((ph) => ph.at < duration && ph.end > ph.at + 0.5)
+    .map((ph) => ({ at: Math.max(0, ph.at), end: Math.min(duration, ph.end), px: pxBox(ph.box) }))
+    .filter((ph): ph is { at: number; end: number; px: { x: number; y: number; w: number; h: number } } => !!ph.px);
+  /** Encaixa um retângulo da fonte numa área OW x OH: preenche se a proporção bate; senão inteiro com desfoque. */
+  const fitInto = (input: string, px: { x: number; y: number; w: number; h: number }, OW: number, OH: number, out: string, tag: string) => {
+    f.push(`[${input}]crop=${px.w}:${px.h}:${px.x}:${px.y},setsar=1[fc_${tag}]`);
+    const ratio = px.w / px.h / (OW / OH);
+    if (ratio > 0.93 && ratio < 1.07) f.push(`[fc_${tag}]scale=${OW}:${OH}:force_original_aspect_ratio=increase,crop=${OW}:${OH},setsar=1[${out}]`);
+    else blurComposite(`fc_${tag}`, out, tag, OW, OH);
+  };
+  /** Sobrepõe as fases ao conteúdo principal, cada uma só na sua janela de tempo. Devolve o rótulo final. */
+  const overlayPhases = (mainLabel: string, inputs: string[], OW: number, OH: number, tag: string) => {
+    let cur = mainLabel;
+    phases.forEach((ph, i) => {
+      fitInto(inputs[i], ph.px, OW, OH, `${tag}v${i}`, `${tag}${i}`);
+      f.push(`[${cur}][${tag}v${i}]overlay=x=0:y=0:enable='between(t,${num(ph.at)},${num(ph.end)})'[${tag}o${i}]`);
+      cur = `${tag}o${i}`;
+    });
+    return cur;
+  };
   if (split) {
     // Facecam INTEIRA em cima, ocupando toda a largura na proporção da própria câmera (sem faixa vazia, sem cortar
     // o streamer); o conteúdo embaixo, inteiro.
@@ -320,7 +346,7 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
     ch = even(Math.min(ch, srcH));
     const camX = Math.round(Math.min(srcW - cw, Math.max(0, (cx0 + cx1) / 2 - cw / 2)));
     const camY = Math.round(Math.min(srcH - ch, Math.max(0, cy0)));
-    f.push(`[${baseIn}]split=2[cam0][game0]`);
+    f.push(`[${baseIn}]split=${2 + phases.length}[cam0][game0]${phases.map((_, i) => `[gp${i}]`).join('')}`);
     f.push(`[cam0]crop=${cw}:${ch}:${camX}:${camY},scale=${W}:${topH},setsar=1[camv]`);
     if (content) {
       // React: o vídeo assistido INTEIRO embaixo, sem pedaço da facecam e sem aproximar demais. Só preenche
@@ -343,11 +369,20 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
       f.push(`[game0]crop=${even(free.w)}:${even(free.h)}:${Math.round(free.x)}:${Math.round(free.y)},setsar=1[gcrop]`);
       blurComposite('gcrop', 'gamev', 'g', W, botH);
     }
-    f.push(`[camv][gamev]vstack=inputs=2,setsar=1[base]`);
-  } else if (baseKind === 'blur' && content) {
-    // Só o conteúdo (sem molduras/fundo de overlay da live) centralizado, com fundo desfocado
-    f.push(`[${baseIn}]crop=${content.w}:${content.h}:${content.x}:${content.y},setsar=1[ccrop]`);
-    blurComposite('ccrop', 'base', 'b');
+    const gameLabel = overlayPhases('gamev', phases.map((_, i) => `gp${i}`), W, botH, 'gph');
+    f.push(`[camv][${gameLabel}]vstack=inputs=2,setsar=1[base]`);
+  } else if (baseKind === 'blur' && (content || phases.length)) {
+    // Só o conteúdo (sem molduras/fundo de overlay da live) centralizado, com fundo desfocado; fases por cima
+    const mainIn = phases.length ? 'bmain' : baseIn;
+    if (phases.length) f.push(`[${baseIn}]split=${1 + phases.length}[bmain]${phases.map((_, i) => `[bp${i}]`).join('')}`);
+    if (content) {
+      f.push(`[${mainIn}]crop=${content.w}:${content.h}:${content.x}:${content.y},setsar=1[ccrop]`);
+      blurComposite('ccrop', phases.length ? 'base0' : 'base', 'b');
+    } else blurComposite(mainIn, phases.length ? 'base0' : 'base', 'b');
+    if (phases.length) {
+      const last = overlayPhases('base0', phases.map((_, i) => `bp${i}`), W, H, 'bph');
+      f.push(`[${last}]null[base]`);
+    }
   } else if (baseKind === 'blur') blurComposite(baseIn, 'base', 'b');
   else if (baseKind === 'crop') f.push(`[${baseIn}]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1[base]`);
   else f.push(`[${baseIn}]scale=${W}:${H},setsar=1[base]`);
