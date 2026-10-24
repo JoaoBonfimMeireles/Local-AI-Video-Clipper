@@ -162,6 +162,18 @@ Lives baixadas da Twitch costumam vir em MPEG-TS com extensão .mp4 (o navegador
 gera uma versão leve de prévia (360p, em `data/cache/previews`) — alguns minutos para 1h de live; depois é imediato.
 O corte final sempre usa o vídeo original.
 
+### A partir de um corte viral
+
+Terceiro tipo de vídeo no formulário. Você coloca em `data/input` o **corte viral** de outra pessoa e o **vídeo original** completo de onde ele saiu, e seleciona o original como vídeo do job. O app:
+
+1. transcreve o corte e acha de onde ele saiu no original, comparando as falas (inclusive trechos montados em outra ordem);
+2. manda para a IA, numa chamada só, a transcrição e 10 frames do corte, onde ele está no original e o trecho do original que cabe no limite;
+3. a IA descreve a fórmula do corte (gancho, ordem, pico, desfecho) e monta de 1 a 10 **variações do mesmo momento**, cada uma com gancho, ordem ou contexto diferentes, mais até 10 **cortes de outras partes** com a mesma pegada.
+
+Tudo é cortado do original: a edição, as legendas e as marcas da outra pessoa não entram. **Quanto do original ler** limita os tokens: só o trecho do corte, 5 a 40 min em volta ou o vídeo inteiro. Um trecho marcado no painel substitui esse limite. Com o Claude pela assinatura, uma leitura de 5 min gastou cerca de 20 mil tokens de entrada e 4 mil de saída.
+
+Com memes ou sons ligados, a IA também pede **material**, por exemplo "foto do Neymar, tela inteira, aos 0:12". Os pedidos aparecem na tela do job com um botão para enviar o arquivo, e **Renderizar de novo com o material** refaz os mesmos cortes, que ficam guardados em `selecao.json`, com o que você mandou. Pedidos sem arquivo ficam de fora. Por enquanto o padrão é **só os cortes, sem memes e sem sons**.
+
 ### Faixa de ouro dos Shorts
 
 A duração padrão é 25s e a IA escolhe, para cada corte, um de dois formatos: **loop** (15-20s: gancho → entrega →

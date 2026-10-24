@@ -20,6 +20,9 @@ import {
   VideoKnowledgeSchema,
   type ClipEdit,
   type VideoKnowledge,
+  buildRecreatePrompt,
+  RECREATE_SYSTEM,
+  RecreatePlanSchema,
 } from '@clipper/editing-planner';
 import type { ClipCandidate } from '@clipper/clip-selection';
 import type { z } from 'zod';
@@ -346,4 +349,65 @@ export async function translateSegments(args: {
     for (const t of res.translations) out.set(t.id, t.text);
   }
   return out;
+}
+
+/**
+ * Sessão "a partir de um corte viral": uma chamada com o corte de referência (transcrição + frames), onde ele está no
+ * original e o trecho do original que cabe no orçamento. Devolve a fórmula do corte e os cortes novos (variações + outras partes).
+ */
+export async function aiRecreateFromReference(args: {
+  llm: LLMProvider;
+  reference: Transcript;
+  referenceFrames: { time: number; path: string }[];
+  matched: { start: number; end: number; refStart: number; refEnd: number }[];
+  original: Transcript;
+  window: { start: number; end: number };
+  variations: number;
+  otherParts: number;
+  settings: JobSettings;
+  app: AppSettings;
+  videoDuration: number;
+  askAssets: boolean;
+  log: Log;
+  signal?: AbortSignal;
+}): Promise<{ concept: string; clips: ClipCandidate[] }> {
+  const sendImages = args.app.sendFramesToAI && args.llm.supportsImages && args.referenceFrames.length > 0;
+  const frames = sendImages ? args.referenceFrames.slice(0, 10) : [];
+  const res = await askJson(
+    args.llm,
+    {
+      system: withGuidelines(RECREATE_SYSTEM, args.app.editingPrompt),
+      prompt: buildRecreatePrompt({
+        referenceText: compactTranscript(args.reference),
+        referenceDuration: args.reference.duration,
+        matchedText: args.matched.map((m) => `- original ${m.start.toFixed(1)}-${m.end.toFixed(1)}s (no corte: ${m.refStart.toFixed(1)}-${m.refEnd.toFixed(1)}s)`).join('\n'),
+        originalText: compactTranscript(args.original, args.window.start, args.window.end),
+        originalWindow: args.window,
+        variations: args.variations,
+        otherParts: args.otherParts,
+        targetDuration: args.settings.targetDuration,
+        visualNotes: frames.length ? frames.map((f, i) => `imagem ${i + 1}: t=${f.time.toFixed(1)}s do corte`).join('\n') : undefined,
+        askAssets: args.askAssets,
+      }),
+      images: frames.length ? frames.map((f) => imageFromFile(f.path)) : undefined,
+      signal: args.signal,
+    },
+    RecreatePlanSchema,
+    args.log,
+  );
+  const clips = res.clips.map((x, i) => ({
+    start: x.start,
+    end: Math.min(x.end, args.videoDuration),
+    segments: x.segments.map((sg) => ({ start: sg.start, end: Math.min(sg.end, args.videoDuration), label: sg.label ?? null })).filter((sg) => sg.end > sg.start + 1),
+    score: x.score,
+    title: x.title,
+    reason: x.reason,
+    hook: x.hook,
+    shortFormat: x.shortFormat ?? null,
+    variant: `${x.kind === 'new' ? 'Novo' : 'Variação'}${x.variant ? `: ${x.variant}` : ''}`,
+    assetRequests: args.askAssets
+      ? x.assets.slice(0, 4).map((a, k) => ({ id: `c${i + 1}r${k + 1}`, at: a.at, duration: a.duration, kind: a.kind, what: a.what, display: a.display, reason: a.reason }))
+      : [],
+  }));
+  return { concept: res.concept, clips };
 }

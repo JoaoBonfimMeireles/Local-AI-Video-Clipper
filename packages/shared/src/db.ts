@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
 const BUILTIN_PRESETS: { name: string; settings: Partial<JobSettings> }[] = [
   {
     name: 'Podcast Vertical com Muita Edição',
-    settings: { format: 'vertical_blur', intensity: 'high', targetDuration: 45, maxClips: 'auto', useMemes: true, useSfx: true },
+    settings: { format: 'vertical_blur', intensity: 'high', targetDuration: 45, maxClips: 'auto', useMemes: false, useSfx: false },
   },
   {
     name: 'Corte Educacional Limpo',

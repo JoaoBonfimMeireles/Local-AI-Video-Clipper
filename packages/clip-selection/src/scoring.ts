@@ -1,4 +1,4 @@
-import type { Transcript } from '@clipper/shared';
+import type { AssetRequest, Transcript } from '@clipper/shared';
 import { buildSentences, snapToSentences, type Sentence } from './sentences';
 
 export interface ClipSegment {
@@ -17,6 +17,10 @@ export interface ClipCandidate {
   category?: string;
   /** Formato da faixa de ouro dos Shorts: "loop" (15-20s) ou "story" (20-40s). */
   shortFormat?: 'loop' | 'story' | null;
+  /** Sessão a partir de corte viral: o que esta versão muda em relação à referência (ou "novo" = outra parte do vídeo). */
+  variant?: string | null;
+  /** Material pedido ao editor para este corte. */
+  assetRequests?: AssetRequest[];
   score: number;
   title: string;
   reason: string;

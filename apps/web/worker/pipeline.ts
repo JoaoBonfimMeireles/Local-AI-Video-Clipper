@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   aiAnalyzeVideo,
   aiPlanEdits,
+  aiRecreateFromReference,
   aiSelectCandidates,
   aiSelectFromKnowledge,
   createLLM,
@@ -75,6 +76,7 @@ import { combineGuidelines, getStyleGuide } from './references';
 import { translateCaptions, writeCaptionFiles, type ClipCaptions } from './captions';
 import { getIllustration } from './illustrations';
 import { manualClipLayout } from './manual-layout';
+import { applyUploadedAssets, prepareReference, writeRequests, type PreparedReference } from './recreate';
 
 // Faixa de progresso global de cada etapa
 const STEP_RANGE: Record<PipelineStep, [number, number]> = {
@@ -279,7 +281,15 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
   if (llm) log('info', `IA: ${result.provider}${app.editingPrompt.trim() ? ' — usando suas diretrizes editoriais' : ''}${styleGuide ? ' — seguindo o guia de estilo das referências' : ''}`);
 
   // Trecho marcado no painel: a IA só olha (e só corta) dentro dele
-  const range = s.range && s.range.end - s.range.start >= 5 ? { start: Math.max(0, s.range.start), end: Math.min(info.duration, s.range.end) } : null;
+  const panelRange = s.range && s.range.end - s.range.start >= 5 ? { start: Math.max(0, s.range.start), end: Math.min(info.duration, s.range.end) } : null;
+  // A partir de um corte viral: o corte de referência define o trecho lido (limite de tokens) em volta de onde ele saiu
+  let refPrep: PreparedReference | null = null;
+  if (s.reference) {
+    refPrep = await cached('reference.json', () =>
+      prepareReference({ ref: s.reference!, original: transcript, duration: info.duration, range: panelRange, app, language: s.sourceLanguage, tempDir, signal, log: (l, m) => log(l, m) }),
+    );
+  }
+  const range = refPrep ? refPrep.window : panelRange;
   const inRange = (a: number, b: number) => !range || (b > range.start && a < range.end);
   const aiTranscript = range ? { ...transcript, segments: transcript.segments.filter((seg) => inRange(seg.start, seg.end)) } : transcript;
   const aiFrames = range ? frames.filter((f) => inRange(f.time, f.time)) : frames;
@@ -297,7 +307,8 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
   // em qualquer job futuro com o mesmo arquivo — economiza transcrição + frames nas próximas edições.
   const cacheBase = videoCacheBase(job.inputPath, app.whisperModel, s.sourceLanguage);
   let knowledge: VideoKnowledge | null = null;
-  if (llm) {
+  // Corte viral de referência: uma chamada só (corte + trecho do original), sem a análise completa do vídeo
+  if (llm && !refPrep) {
     // A análise de live (Twitch) tem outro olhar e outras categorias: cache separado por modo
     // v2: análise de live mais densa (≈1 momento/30s) e com picos de volume — invalida análises antigas mais rasas
     // Análise feita por modelo gratuito/limitado fica separada: com IA paga o vídeo é reanalisado com mais qualidade
@@ -411,6 +422,43 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
 
   const selected = await cached<SelectedClip[]>('selected.json', async () => {
     let candidates: ClipCandidate[] = [];
+    // Corte viral: a seleção fica guardada junto da saída — "renderizar de novo com o material" mantém os mesmos cortes
+    const keptSelection = path.join(outputDir, 'selecao.json');
+    if (refPrep && fs.existsSync(keptSelection)) {
+      log('info', 'Mantendo os mesmos cortes da primeira vez (seleção guardada)');
+      return JSON.parse(fs.readFileSync(keptSelection, 'utf8')) as SelectedClip[];
+    }
+    if (llm && refPrep && s.reference) {
+      try {
+        log('info', `Estudando o corte de referência e montando ${s.reference.variations} variação(ões)${s.reference.otherParts ? ` + até ${s.reference.otherParts} corte(s) de outras partes` : ''} com ${llm.model}`);
+        const out = await aiRecreateFromReference({
+          llm,
+          reference: refPrep.transcript,
+          referenceFrames: refPrep.frames,
+          matched: refPrep.matched,
+          original: transcript,
+          window: refPrep.window,
+          variations: s.reference.variations,
+          otherParts: s.reference.otherParts,
+          settings: s,
+          app: appGuided,
+          videoDuration: info.duration,
+          askAssets: s.useMemes || s.useSfx,
+          signal,
+          log: (l, m) => log(l, m),
+        });
+        log('info', `Fórmula do corte: ${out.concept.replace(/\s+/g, ' ').slice(0, 400)}`);
+        fs.writeFileSync(path.join(tempDir, 'concept.txt'), out.concept, 'utf8');
+        // Variações se sobrepõem de propósito (é o mesmo momento): sem o filtro de repetição da seleção normal
+        const picked = out.clips.map(tidy).map(clampToRange).filter((c): c is ClipCandidate => !!c && c.score > 0);
+        const kept = picked.map((c, index) => ({ ...c, segments: segmentsOf(c), index }));
+        fs.writeFileSync(keptSelection, JSON.stringify(kept));
+        return kept;
+      } catch (e) {
+        if (signal.aborted) throw e;
+        log('warn', `Recriação a partir do corte falhou (${(e as Error).message}); usando a seleção normal no trecho`);
+      }
+    }
     if (llm) {
       try {
         if (knowledge) {
@@ -617,8 +665,8 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
           assetMeta,
           splitLayout: selected.every((c) => fixedLayout(c.index)),
           catalog: catalog.text,
-          // Lives: nada de imagens/ilustrações por cima (só memes em vídeo e sons)
-          illustrations: app.useIllustrations && s.mode !== 'twitch',
+          // Lives: nada de imagens/ilustrações por cima (só memes em vídeo e sons); corte viral: o material vem dos pedidos
+          illustrations: app.useIllustrations && s.mode !== 'twitch' && !s.reference,
           signal,
           log: (l, m) => log(l, m),
         });
@@ -690,6 +738,14 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       }
       p.overlays.sort((a, b) => a.at - b.at);
     }
+  }
+  // Corte viral: pedidos de material para a tela de pedidos + o que o editor já mandou entra no plano
+  if (s.reference) {
+    const conceptFile = path.join(tempDir, 'concept.txt');
+    const conceptKept = path.join(outputDir, 'formula.txt');
+    if (fs.existsSync(conceptFile)) fs.copyFileSync(conceptFile, conceptKept);
+    writeRequests(outputDir, selected, fs.existsSync(conceptKept) ? fs.readFileSync(conceptKept, 'utf8') : '');
+    await applyUploadedAssets(plan, selected, outputDir, (l, m) => log(l, m));
   }
   // Memes escolhidos fora da pré-seleção (plano heurístico) também precisam de duração/áudio/fundo verde
   await analyzeRefs(plan.flatMap((p) => p.overlays.map((o) => ({ kind: o.type === 'image' ? ('images' as const) : ('memes' as const), cat: o.category, file: o.fileName }))));
@@ -945,6 +1001,9 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         // Faixa de ouro dos Shorts: formato escolhido e texto sugerido para a capa
         shortFormat: c.shortFormat ?? null,
         coverText: edit.coverText ?? null,
+        // Corte viral: o que esta versão muda e o material pedido
+        variant: c.variant ?? null,
+        assetRequests: c.assetRequests?.length ? c.assetRequests : undefined,
         hashtags: edit.hashtags,
         source: { file: path.basename(job.inputPath), start: c.start, end: c.end, segments: c.segments },
         duration: Number((duration + pausedTotal).toFixed(3)),

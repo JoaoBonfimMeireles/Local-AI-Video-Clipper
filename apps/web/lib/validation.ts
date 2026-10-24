@@ -36,6 +36,15 @@ export const JobSettingsSchema = z.object({
     })
     .nullable()
     .default(null),
+  reference: z
+    .object({
+      clipFile: z.string().min(1).max(260),
+      variations: z.coerce.number().int().min(1).max(10),
+      otherParts: z.coerce.number().int().min(0).max(10),
+      scanMinutes: z.coerce.number().int().min(0).max(600).nullable(),
+    })
+    .nullable()
+    .default(null),
 });
 
 export const CreateJobSchema = z.object({

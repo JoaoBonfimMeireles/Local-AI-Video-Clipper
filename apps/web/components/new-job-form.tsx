@@ -82,7 +82,7 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
     const p = presets.find((x) => x.id === id);
     if (p) {
       // Créditos pertencem ao vídeo, não ao estilo: o preset não os sobrescreve
-      setSettings((cur) => ({ ...DEFAULT_JOB_SETTINGS, ...p.settings, creditTitle: cur.creditTitle, creditChannel: cur.creditChannel, creditUrl: cur.creditUrl, range: cur.range, manualLayout: cur.manualLayout }));
+      setSettings((cur) => ({ ...DEFAULT_JOB_SETTINGS, ...p.settings, creditTitle: cur.creditTitle, creditChannel: cur.creditChannel, creditUrl: cur.creditUrl, range: cur.range, manualLayout: cur.manualLayout, reference: cur.reference }));
       setPresetName(p.builtin ? '' : p.name);
     }
   }
@@ -108,6 +108,7 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
 
   async function submit() {
     if (!selected) return setMessage({ type: 'error', text: 'Selecione ou envie um vídeo.' });
+    if (settings.reference && !settings.reference.clipFile) return setMessage({ type: 'error', text: 'Escolha o corte viral de referência.' });
     setSubmitting(true);
     setMessage(null);
     try {
@@ -227,7 +228,7 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
         {/* Tipo de conteúdo */}
         <section className="space-y-2">
           <Label>Tipo de vídeo</Label>
-          <div className="grid gap-2 sm:grid-cols-2">
+          <div className="grid gap-2 sm:grid-cols-3">
             {(
               [
                 { value: 'youtube', label: 'YouTube / podcast', desc: 'Entrevistas, podcasts, vlogs: falas fortes e histórias completas' },
@@ -237,14 +238,69 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
               <button
                 key={m.value}
                 type="button"
-                onClick={() => set('mode', m.value)}
-                className={cn('rounded-lg border p-3 text-left transition-colors', settings.mode === m.value ? 'border-primary bg-primary/10' : 'hover:bg-accent/40')}
+                onClick={() => setSettings((s) => ({ ...s, mode: m.value, reference: null }))}
+                className={cn('rounded-lg border p-3 text-left transition-colors', settings.mode === m.value && !settings.reference ? 'border-primary bg-primary/10' : 'hover:bg-accent/40')}
               >
                 <div className="text-sm font-semibold">{m.label}</div>
                 <div className="mt-0.5 text-xs text-muted-foreground">{m.desc}</div>
               </button>
             ))}
+            <button
+              type="button"
+              onClick={() => set('reference', settings.reference ?? { clipFile: files.find((f) => f.name !== selected)?.name ?? '', variations: 5, otherParts: 3, scanMinutes: 20 })}
+              className={cn('rounded-lg border p-3 text-left transition-colors', settings.reference ? 'border-primary bg-primary/10' : 'hover:bg-accent/40')}
+            >
+              <div className="text-sm font-semibold">A partir de um corte viral</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">Você manda o corte de outra pessoa e o original: a IA recria do original, com montagem própria</div>
+            </button>
           </div>
+          {settings.reference && (
+            <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
+              <p className="text-xs text-muted-foreground">
+                O vídeo selecionado acima é o <b>original completo</b>. Escolha aqui o <b>corte viral</b> (também em data/input). Nada da edição da outra pessoa é usado: o app só aprende a ideia e corta do original.
+              </p>
+              <div className="space-y-1.5">
+                <Label>Corte viral de referência</Label>
+                <Select value={settings.reference.clipFile} onChange={(e) => set('reference', { ...settings.reference!, clipFile: e.target.value })}>
+                  <option value="">— escolha o corte —</option>
+                  {files
+                    .filter((f) => f.name !== selected)
+                    .map((f) => (
+                      <option key={f.name} value={f.name}>
+                        {f.name} ({formatBytes(f.size)})
+                      </option>
+                    ))}
+                </Select>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="space-y-1.5">
+                  <Label>Versões do mesmo momento</Label>
+                  <Input type="number" min={1} max={10} value={settings.reference.variations} onChange={(e) => set('reference', { ...settings.reference!, variations: Math.min(10, Math.max(1, Number(e.target.value) || 1)) })} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Cortes de outras partes</Label>
+                  <Input type="number" min={0} max={10} value={settings.reference.otherParts} onChange={(e) => set('reference', { ...settings.reference!, otherParts: Math.min(10, Math.max(0, Number(e.target.value) || 0)) })} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Quanto do original ler</Label>
+                  <Select
+                    value={settings.reference.scanMinutes === null ? 'all' : String(settings.reference.scanMinutes)}
+                    onChange={(e) => set('reference', { ...settings.reference!, scanMinutes: e.target.value === 'all' ? null : Number(e.target.value) })}
+                  >
+                    <option value="0">Só o trecho do corte (mais barato)</option>
+                    <option value="5">5 min em volta</option>
+                    <option value="10">10 min em volta</option>
+                    <option value="20">20 min em volta</option>
+                    <option value="40">40 min em volta</option>
+                    <option value="all">O vídeo inteiro (mais tokens)</option>
+                  </Select>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Os cortes de outras partes saem só do trecho lido. Se você marcar um trecho no painel do vídeo, ele substitui esse limite. Com memes/sons ligados, a IA lista o material que precisa (imagens, memes, sons) e você manda na tela do job.
+              </p>
+            </div>
+          )}
           {settings.mode === 'twitch' && (
             <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
               <div>
@@ -387,6 +443,13 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
         </section>
 
         <section className="grid gap-3 sm:grid-cols-2">
+          <div className="sm:col-span-2">
+            <Toggle
+              label="Só os cortes (sem memes e sem sons)"
+              checked={!settings.useMemes && !settings.useSfx}
+              onChange={(v) => setSettings((s) => ({ ...s, useMemes: !v, useSfx: !v }))}
+            />
+          </div>
           <Toggle label="Incorporar legendas no MP4" checked={settings.burnSubtitles} onChange={(v) => set('burnSubtitles', v)} />
           <Toggle label="Exportar arquivos .srt" checked={settings.exportSrt} onChange={(v) => set('exportSrt', v)} />
           <Toggle label="Usar memes da biblioteca" checked={settings.useMemes} onChange={(v) => set('useMemes', v)} />

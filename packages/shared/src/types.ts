@@ -99,6 +99,40 @@ export interface JobSettings {
   range?: { start: number; end: number } | null;
   /** Áreas marcadas à mão no painel (câmera do streamer e conteúdo do react). */
   manualLayout?: ManualLayout | null;
+  /** Sessão "a partir de um corte viral": o corte de outra pessoa serve de modelo e o vídeo de entrada é o original. */
+  reference?: ReferenceJob | null;
+}
+
+/**
+ * Recria um corte viral a partir do vídeo ORIGINAL: a IA entende a ideia do corte de referência e gera versões
+ * próprias do mesmo momento e cortes novos com a mesma pegada em outras partes. Nada da edição da outra pessoa é usado.
+ */
+export interface ReferenceJob {
+  /** Corte de referência (arquivo em data/input). */
+  clipFile: string;
+  /** Quantas versões do MESMO momento (3 a 10). */
+  variations: number;
+  /** Quantos cortes novos, com a mesma pegada, de OUTRAS partes do original (0 = nenhum). */
+  otherParts: number;
+  /**
+   * Quanto do original a IA lê, em minutos, em volta do trecho do corte (limita os tokens).
+   * 0 = só o trecho do corte (com um pouco de contexto); null = o vídeo inteiro.
+   */
+  scanMinutes: number | null;
+}
+
+/** Material que a IA pede ao editor (imagem, meme ou som) para um momento de um corte. */
+export interface AssetRequest {
+  id: string;
+  /** Segundos desde o início do corte. */
+  at: number;
+  duration: number;
+  kind: 'image' | 'meme' | 'sound';
+  /** O que mostrar/tocar ("foto do Neymar", "logo da Coca-Cola", "som de risada de plateia"). */
+  what: string;
+  /** Como entra: tela inteira, quadro no canto ou por cima da câmera. */
+  display: 'full' | 'corner' | 'top';
+  reason: string;
 }
 
 /** Retângulo em frações do quadro original (0..1). */
@@ -176,8 +210,9 @@ export const DEFAULT_JOB_SETTINGS: JobSettings = {
   burnSubtitles: true,
   exportSrt: true,
   removeOldSubtitles: true,
-  useMemes: true,
-  useSfx: true,
+  // Por enquanto só os cortes: memes e sons ficam desligados (podem ser ligados no formulário)
+  useMemes: false,
+  useSfx: false,
   creditTitle: '',
   creditChannel: '',
   creditUrl: '',

@@ -9,6 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Progress } from '@/components/ui/progress';
 import { JobStatusBadge, stepLabel } from '@/components/job-status';
 import { ManualEditor } from '@/components/manual-editor';
+import { AssetRequests } from '@/components/asset-requests';
 import { api, fileUrl } from '@/lib/client';
 import { cn } from '@/lib/utils';
 
@@ -201,6 +202,7 @@ export function JobDetail({ id }: { id: string }) {
       </div>
 
       {job.result?.outputDir && job.status === 'completed' && <VideoInfo outputDir={job.result.outputDir} />}
+      {job.settings.reference && <AssetRequests jobId={job.id} canRerender={job.status === 'completed' || job.status === 'failed'} />}
 
       <div className="space-y-3">
         <h2 className="text-lg font-semibold">Cortes {clips.length > 0 && <span className="text-muted-foreground">({clips.filter((c) => c.status === 'completed').length}/{clips.length})</span>}</h2>
