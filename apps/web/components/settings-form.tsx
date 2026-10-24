@@ -27,6 +27,7 @@ const PROVIDERS: { value: AiProviderName; label: string; desc: string }[] = [
   { value: 'heuristic', label: 'Heurístico local', desc: 'Sem LLM: pontuação por gatilhos, energia do áudio e estrutura das frases.' },
   { value: 'gemini', label: 'Google Gemini', desc: 'Gemini 3 Flash / Pro, multimodal (transcrição + frames). Tem plano gratuito.' },
   { value: 'anthropic', label: 'Anthropic Claude', desc: 'Multimodal (transcrição + frames). Requer ANTHROPIC_API_KEY.' },
+  { value: 'claude-code', label: 'Claude (sua assinatura, via Claude Code)', desc: 'Sem custo por token; usa o limite do seu plano Pro/Max, compartilhado com seu uso normal do Claude.' },
   { value: 'ollama', label: 'Ollama (local)', desc: 'LLM rodando na sua máquina (ex.: llama3). Sem custo, sem internet.' },
 ];
 
@@ -147,6 +148,21 @@ export function SettingsForm() {
                 <KeyField name="ANTHROPIC_API_KEY" configured={secrets.ANTHROPIC_API_KEY} value={keys.ANTHROPIC_API_KEY} onChange={(v) => setKeys((k) => ({ ...k, ANTHROPIC_API_KEY: v }))} onRemove={() => removeKey('ANTHROPIC_API_KEY')} />
               </div>
             )}
+            {settings.aiProvider === 'claude-code' && (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Modelo">
+                  <Input value={settings.claudeCodeModel} onChange={(e) => set('claudeCodeModel', e.target.value)} placeholder="sonnet" />
+                </Field>
+                <div className="flex items-end">
+                  <Button type="button" variant="outline" onClick={test} disabled={testing}>
+                    {testing ? 'Testando…' : 'Testar'}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground sm:col-span-2">
+                  Usa o Claude Code instalado na máquina (ou CLAUDE_CLI_PATH no .env.local), logado com <code>claude auth login</code>. O teste confere se o CLI está instalado e logado.
+                </p>
+              </div>
+            )}
             {settings.aiProvider === 'ollama' && (
               <div className="grid gap-3 sm:grid-cols-2">
                 <Field label="URL do Ollama">
@@ -157,7 +173,7 @@ export function SettingsForm() {
                 </Field>
               </div>
             )}
-            {settings.aiProvider !== 'heuristic' && settings.aiProvider !== 'ollama' && (
+            {settings.aiProvider !== 'heuristic' && settings.aiProvider !== 'ollama' && settings.aiProvider !== 'claude-code' && (
               <p className="text-xs text-muted-foreground">As chaves ficam em <code>.env.local</code> na raiz do projeto e nunca são enviadas ao navegador.</p>
             )}
             <label className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5">

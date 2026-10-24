@@ -12,6 +12,8 @@ export interface RunOptions {
   captureStdout?: boolean;
   /** Saída binária (ex.: frames rawvideo): stdout vira string latin1 (1 byte = 1 caractere, sem perdas). */
   binaryStdout?: boolean;
+  /** Texto enviado pelo stdin (prompts longos não cabem na linha de comando do Windows). */
+  input?: string;
 }
 
 export interface RunResult {
@@ -75,11 +77,14 @@ export function runProcess(cmd: string, args: string[], opts: RunOptions = {}): 
       env: opts.env ?? process.env,
       shell: false,
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
     installExitHook();
     if (child.pid) liveChildren.add(child.pid);
     child.on('exit', () => child.pid && liveChildren.delete(child.pid));
+    // stdin fechado logo de cara (EOF), ou com o texto de `input`; o processo pode fechá-lo antes (erro aparece pelo código de saída)
+    child.stdin.on('error', () => {});
+    child.stdin.end(opts.input ?? '', 'utf8');
     const tailMax = opts.stderrTailBytes ?? 8000;
     let stderrTail = '';
     const stdoutChunks: string[] = [];

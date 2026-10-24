@@ -22,9 +22,48 @@ export const TWITCH_CATEGORIES: { key: TwitchCategory; label: string; desc: stri
 ];
 
 export type OutputFormat = 'original' | 'vertical_blur' | 'vertical_crop' | 'square';
-export type AiProviderName = 'heuristic' | 'gemini' | 'anthropic' | 'ollama';
+export type AiProviderName = 'heuristic' | 'gemini' | 'anthropic' | 'claude-code' | 'ollama';
 export type WhisperDevice = 'auto' | 'cuda' | 'cpu';
 export type HwAccel = 'none' | 'nvenc';
+
+/**
+ * Edição manual de um corte pronto (painel "Editar"): substitui o plano da IA sem chamar a IA.
+ * Tempos de memes/sons/zooms/enquadramentos são relativos ao início do corte; trechos, absolutos no vídeo.
+ */
+export interface ManualEdit {
+  segments: { start: number; end: number; label?: string | null }[];
+  shots: { at: number; duration: number; type: 'focus' | 'wide'; focusX: number; focusY: number; scale: number }[];
+  zooms: { at: number; duration: number; scale: number; focusX: number; focusY: number }[];
+  overlays: { type: 'meme' | 'image'; category: string; file: string; at: number; duration: number; position: 'center' | 'top' | 'bottom' | 'top-left' | 'top-right'; scale: number; audioMode: 'meme' | 'video' | 'both' }[];
+  sfx: { category: string; file: string; at: number; volume: number; duration?: number }[];
+  /** Layout facecam: 1 = como a IA deixou; > 1 aproxima o rosto (recorta mais apertado a câmera). */
+  camZoom?: number;
+  /** Enquadramento manual por trechos de tempo: substitui shots/facecam da IA quando presente. */
+  frames?: ManualFrame[];
+}
+
+/** Caixa no quadro ORIGINAL, em frações (0-1). */
+export interface FrameBox {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+/**
+ * Enquadramento manual de um intervalo do corte (tempo do plano). single: uma área do vídeo original na tela
+ * toda (cover = preenche; blur = inteira com fundo desfocado). split: câmera em cima (box) e conteúdo embaixo (box2),
+ * com a câmera ocupando `topRatio` da altura. Usado igual na prévia ao vivo e na renderização.
+ */
+export interface ManualFrame {
+  at: number;
+  end: number;
+  mode: 'single' | 'split';
+  fit: 'cover' | 'blur';
+  box: FrameBox;
+  box2?: FrameBox;
+  topRatio?: number;
+}
 
 /** Parâmetros editoriais de um job (o que o painel envia). */
 export interface JobSettings {
@@ -50,7 +89,7 @@ export interface JobSettings {
   mode: ContentMode;
   /** Job de AJUSTE: refaz só um corte já pronto a partir de um comentário (não reprocessa o vídeo). */
   /** Ajuste de um corte pronto. Com `favoriteId`, ajusta a cópia guardada nos favoritos (e não o corte do job). */
-  revision?: { parentJobId: string; clipIndex: number; comment: string; favoriteId?: string } | null;
+  revision?: { parentJobId: string; clipIndex: number; comment: string; favoriteId?: string; manual?: ManualEdit } | null;
   /** Job que só analisa os clipes de referência (gera o guia de estilo), sem vídeo de entrada. */
   analyzeReferences?: boolean;
   /** Modo Twitch: quais tipos de momento procurar. */
@@ -114,6 +153,8 @@ export interface AppSettings {
   /** Claude que escolhe os cortes (o mais capaz). */
   anthropicSelectModel: string;
   anthropicModel: string;
+  /** Modelo do Claude Code (assinatura): alias como sonnet / opus, ou o nome completo. */
+  claudeCodeModel: string;
   ollamaUrl: string;
   ollamaModel: string;
   whisperModel: string;
@@ -158,6 +199,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   useReferences: true,
   anthropicSelectModel: 'claude-opus-5-5',
   anthropicModel: 'claude-sonnet-5-5',
+  claudeCodeModel: 'sonnet',
   ollamaUrl: 'http://127.0.0.1:11434',
   ollamaModel: 'llama3',
   whisperModel: 'small',

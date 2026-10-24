@@ -45,7 +45,7 @@ export const CreateJobSchema = z.object({
 
 export const AppSettingsSchema = z
   .object({
-    aiProvider: z.enum(['heuristic', 'gemini', 'anthropic', 'ollama']),
+    aiProvider: z.enum(['heuristic', 'gemini', 'anthropic', 'claude-code', 'ollama']),
     geminiPlan: z.enum(['free', 'paid', 'hybrid']),
     geminiFlashModel: z.string().regex(/^[\w.\-]{1,80}$/),
     geminiProModel: z.string().regex(/^[\w.\-]{1,80}$/),
@@ -57,6 +57,7 @@ export const AppSettingsSchema = z
     postLanguage: z.union([z.literal(''), z.string().regex(/^[a-z]{2,3}$/)]),
     anthropicModel: z.string().regex(/^[\w.\-]{1,80}$/),
     anthropicSelectModel: z.string().regex(/^[\w.\-]{1,80}$/),
+    claudeCodeModel: z.string().regex(/^[\w.\-\[\]]{1,80}$/),
     ollamaUrl: z.string().url().regex(/^https?:\/\//),
     ollamaModel: z.string().regex(/^[\w.\-:/]{1,80}$/),
     whisperModel: z.string().regex(/^[\w.\-/]{1,100}$/),

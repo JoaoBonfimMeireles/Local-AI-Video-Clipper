@@ -220,7 +220,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
   const frames = await cached<ExtractedFrame[]>('frames.json', async () => {
     // IA paga enxerga bem mais: ~1 imagem a cada 6s (24 a 72), e sempre imagens DENTRO dos trechos sem fala,
     // onde a ação é só visual (alguém fazendo algo que gera a reação logo depois)
-    const paidVision = app.sendFramesToAI && (app.aiProvider === 'anthropic' || (app.aiProvider === 'gemini' && app.geminiPlan !== 'free'));
+    const paidVision = app.sendFramesToAI && (app.aiProvider === 'anthropic' || app.aiProvider === 'claude-code' || (app.aiProvider === 'gemini' && app.geminiPlan !== 'free'));
     const maxFrames = paidVision ? Math.min(72, Math.max(24, Math.round(info.duration / 6))) : 24;
     const gapPoints = silentGaps(transcript).flatMap((g) => {
       const n = Math.max(1, Math.min(4, Math.floor((g.end - g.start) / 4)));
@@ -968,6 +968,8 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
           category: c.category ?? null,
           segments: c.segments,
         },
+        // Pausas inseridas para os sons (tempo do plano, sem pausas): o editor manual converte para o tempo do vídeo
+        soundPauses: pauses.map((p) => ({ at: p.at, duration: p.duration })),
         edit: {
           shots: edit.shots,
           zooms: edit.zooms,

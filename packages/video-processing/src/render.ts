@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { HwAccel, OutputFormat } from '@clipper/shared';
+import type { HwAccel, ManualFrame, OutputFormat } from '@clipper/shared';
 import { insertSoundPauses, type SoundPause } from './pauses';
 import { runFfmpeg, sec } from './ffmpeg';
 
@@ -85,6 +85,8 @@ export interface RenderSpec {
   bubble?: { x0: number; y0: number; x1: number; y1: number } | null;
   /** Efeitos sonoros com o vídeo pausado (congelado) enquanto tocam — não atropelam a fala. */
   pauses?: SoundPause[];
+  /** Enquadramento manual (editor): substitui shots, facecam, conteúdo e bolha da IA. */
+  manualFrames?: ManualFrame[] | null;
   /** Área do conteúdo no quadro original (ex.: o vídeo assistido num react), sem a facecam nem molduras. */
   content?: { x0: number; y0: number; x1: number; y1: number } | null;
   output: string;
@@ -162,6 +164,9 @@ function quantizeZoom(s: number): number {
 
 /** Monta os argumentos completos do FFmpeg para um corte. Exportado para testes/debug. */
 export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): { args: string[]; duration: number } {
+  // Enquadramento manual: ignora o da IA (o editor já mostra exatamente o que vai sair)
+  const manual = spec.manualFrames?.length ? spec.manualFrames : null;
+  if (manual) spec = { ...spec, shots: [], split: null, content: null, contentPhases: null, bubble: null };
   const duration = spec.end - spec.start;
   if (!(duration > 0.5)) throw new Error(`Duração de corte inválida: ${duration}`);
   const { width: W, height: H } = canvasSize(spec.format, spec.source);
@@ -325,7 +330,42 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
     });
     return cur;
   };
-  if (split) {
+  if (manual) {
+    // Um ramo por intervalo; o primeiro é a base e os outros entram por cima só no seu tempo
+    const frames = [...manual].sort((a, b) => a.at - b.at);
+    const whole = { x: 0, y: 0, w: even(srcW), h: even(srcH) };
+    const twoBoxes = (fr: ManualFrame) => fr.mode === 'split' && !!fr.box2;
+    const parts = frames.map((fr) => (twoBoxes(fr) ? 2 : 1));
+    const total = parts.reduce((a, b) => a + b, 0);
+    const ins = Array.from({ length: total }, (_, i) => `mfi${i}`);
+    if (total > 1) f.push(`[${baseIn}]split=${total}${ins.map((l) => `[${l}]`).join('')}`);
+    else ins[0] = baseIn;
+    let k = 0;
+    /** Área da fonte numa região OW x OH: cover = preenche (apara sobras); blur = inteira com fundo desfocado. */
+    const place = (input: string, box: ManualFrame['box'], fit: ManualFrame['fit'], OW: number, OH: number, out: string, tag: string) => {
+      const px = pxBox(box) ?? whole;
+      f.push(`[${input}]crop=${px.w}:${px.h}:${px.x}:${px.y},setsar=1[mc_${tag}]`);
+      if (fit === 'blur') blurComposite(`mc_${tag}`, out, `m${tag}`, OW, OH);
+      else f.push(`[mc_${tag}]scale=${OW}:${OH}:force_original_aspect_ratio=increase,crop=${OW}:${OH},setsar=1[${out}]`);
+    };
+    frames.forEach((fr, i) => {
+      if (twoBoxes(fr)) {
+        const topH = even(H * Math.min(0.8, Math.max(0.2, fr.topRatio ?? 0.4)));
+        place(ins[k++], fr.box, 'cover', W, topH, `mt${i}`, `t${i}`);
+        place(ins[k++], fr.box2!, fr.fit, W, H - topH, `mb${i}`, `b${i}`);
+        f.push(`[mt${i}][mb${i}]vstack=inputs=2,setsar=1[mf${i}]`);
+      } else {
+        place(ins[k++], fr.box, fr.fit, W, H, `mf${i}`, `s${i}`);
+      }
+    });
+    let cur = 'mf0';
+    frames.slice(1).forEach((fr, j) => {
+      const i = j + 1;
+      f.push(`[${cur}][mf${i}]overlay=x=0:y=0:enable='between(t,${num(Math.max(0, fr.at))},${num(Math.min(duration, fr.end))})'[mo${i}]`);
+      cur = `mo${i}`;
+    });
+    f.push(`[${cur}]null[base]`);
+  } else if (split) {
     // Facecam INTEIRA em cima, ocupando toda a largura na proporção da própria câmera (sem faixa vazia, sem cortar
     // o streamer); o conteúdo embaixo, inteiro.
     const cam = split.cam;

@@ -1,13 +1,14 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { ArrowLeft, Ban, Check, CheckCircle2, Circle, CircleDot, Clapperboard, Copy, Download, PenLine, FileJson, FileText, FolderOpen, Loader2, RotateCcw, Star, XCircle } from 'lucide-react';
+import { ArrowLeft, Ban, Check, CheckCircle2, Circle, CircleDot, Clapperboard, Copy, Download, PenLine, FileJson, FileText, FolderOpen, Loader2, RotateCcw, SlidersHorizontal, Star, XCircle } from 'lucide-react';
 import { formatTimestamp, PIPELINE_STEPS, type Clip, type Job, type JobLog } from '@clipper/shared';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { JobStatusBadge, stepLabel } from '@/components/job-status';
+import { ManualEditor } from '@/components/manual-editor';
 import { api, fileUrl } from '@/lib/client';
 import { cn } from '@/lib/utils';
 
@@ -549,8 +550,16 @@ function ClipCard({
 }) {
   const thumb = clip.outputPath?.replace(/\.mp4$/, '.jpg');
   const revising = revisionActive(revision);
+  const [editing, setEditing] = useState(false);
   return (
     <Card className={cn('overflow-hidden', revising && 'ring-2 ring-primary/50')}>
+      {editing && (
+        <ManualEditor
+          clip={clip}
+          onClose={() => setEditing(false)}
+          onQueued={(id, createdAt) => onRevise({ id, status: 'pending', step: 'plan', progress: 0, comment: 'Edição manual', error: null, finishedAt: null, createdAt })}
+        />
+      )}
       <div className="relative grid aspect-video place-items-center bg-black/50">
         {revising && (
           <div className="absolute inset-0 z-10 grid place-items-center bg-black/60 text-sm text-white">
@@ -582,6 +591,11 @@ function ClipCard({
         {clip.status === 'completed' && clip.metadataPath && <ClipAssets key={clip.metadataPath} metadataPath={clip.metadataPath} />}
         {clip.status === 'completed' && clip.metadataPath && <LanguageDownloads key={`l${clip.metadataPath}`} metadataPath={clip.metadataPath} />}
         {revision && <RevisionBanner rev={revision} />}
+        {clip.status === 'completed' && !revising && clip.metadataPath && (
+          <Button variant="outline" size="sm" className="w-full" onClick={() => setEditing(true)}>
+            <SlidersHorizontal /> Editar manualmente
+          </Button>
+        )}
         {clip.status === 'completed' && !revising && <ReviseBox endpoint={`/api/jobs/${clip.jobId}/clips/${clip.index}/revise`} onQueued={onRevise} />}
         {clip.error && <p className="line-clamp-4 text-xs whitespace-pre-wrap text-destructive">{clip.error}</p>}
         {clip.status === 'completed' && clip.outputPath && (

@@ -1,6 +1,8 @@
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { AppSettings, LLMRole } from '@clipper/shared';
-import { getEnvValue } from '@clipper/shared/server';
+import { getEnvValue, runProcess } from '@clipper/shared/server';
 
 export interface LLMImage {
   mimeType: 'image/jpeg' | 'image/png';
@@ -350,6 +352,124 @@ class OllamaProvider implements LLMProvider {
   }
 }
 
+/** Limite de uso da assinatura (o CLI devolve isso como texto do resultado ou no stderr). */
+const USAGE_LIMIT_RE = /usage limit|limit reached|limit will reset|rate limit|5-hour limit|weekly limit|out of extra usage/i;
+const CLAUDE_CODE_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * Executável do Claude Code: CLAUDE_CLI_PATH (.env.local) → "claude" no PATH → cópia que vem com o app desktop.
+ * Arquivos .cmd não rodam sem shell; por isso só .exe (ou binário sem extensão fora do Windows).
+ */
+export function resolveClaudeCli(): string | null {
+  const custom = getEnvValue('CLAUDE_CLI_PATH');
+  if (custom) return fs.existsSync(custom) ? custom : null;
+  const win = process.platform === 'win32';
+  const names = win ? ['claude.exe'] : ['claude'];
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
+    for (const n of names) {
+      const f = path.join(dir.replace(/^"|"$/g, ''), n);
+      if (dir && fs.existsSync(f)) return f;
+    }
+  }
+  const candidates = [path.join(os.homedir(), '.local', 'bin', names[0])];
+  // App desktop: %LOCALAPPDATA%\Claude-Data\<pacote>\claude-code\<versão>\<hash>\claude.exe (a mais nova)
+  const base = win && process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Claude-Data') : null;
+  if (base && fs.existsSync(base)) {
+    const found: { file: string; mtime: number }[] = [];
+    for (const pkg of fs.readdirSync(base)) {
+      const cc = path.join(base, pkg, 'claude-code');
+      if (!fs.existsSync(cc)) continue;
+      for (const ver of fs.readdirSync(cc)) {
+        const vdir = path.join(cc, ver);
+        if (!fs.statSync(vdir).isDirectory()) continue;
+        for (const h of fs.readdirSync(vdir)) {
+          const f = path.join(vdir, h, 'claude.exe');
+          if (fs.existsSync(f)) found.push({ file: f, mtime: fs.statSync(f).mtimeMs });
+        }
+      }
+    }
+    candidates.push(...found.sort((a, b) => b.mtime - a.mtime).map((x) => x.file));
+  }
+  return candidates.find((f) => fs.existsSync(f)) ?? null;
+}
+
+/**
+ * Claude pela ASSINATURA do usuário (Pro/Max), via Claude Code CLI em modo não interativo.
+ * Sem custo por token: consome o limite do plano. Só a ferramenta Read fica liberada, e só para ler os frames.
+ */
+class ClaudeCodeProvider implements LLMProvider {
+  name = 'claude-code';
+  supportsImages = true;
+  maxPromptChars = 600_000;
+  free = true;
+  usage: LLMUsage = { calls: 0, inputTokens: 0, outputTokens: 0 };
+  constructor(public model: string) {}
+
+  async complete(req: LLMRequest): Promise<string> {
+    const cli = resolveClaudeCli();
+    if (!cli) throw new Error('Claude Code CLI não encontrado: instale o Claude Code ou defina CLAUDE_CLI_PATH no .env.local');
+    // Pasta temporária vazia como cwd: o CLI não carrega CLAUDE.md nem enxerga o repositório
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clipper-cc-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'system.txt'), req.system, 'utf8');
+      let prompt = req.prompt;
+      const images = req.images ?? [];
+      if (images.length) {
+        const imgDir = path.join(dir, 'frames');
+        fs.mkdirSync(imgDir);
+        const files = images.map((img, i) => {
+          const f = path.join(imgDir, `frame_${String(i + 1).padStart(3, '0')}.${img.mimeType === 'image/png' ? 'png' : 'jpg'}`);
+          fs.writeFileSync(f, Buffer.from(img.base64, 'base64'));
+          return f;
+        });
+        prompt =
+          `Antes de responder, use a ferramenta Read para abrir TODAS as ${files.length} imagens abaixo, na ordem (elas são as imagens anexadas a este pedido):\n` +
+          files.map((f, i) => `${i + 1}. ${f}`).join('\n') +
+          `\n\n${prompt}`;
+      }
+      const args = [
+        '-p',
+        '--output-format', 'json',
+        '--model', this.model,
+        '--system-prompt-file', path.join(dir, 'system.txt'),
+        // Nenhuma ferramenta além de Read (sem Bash, Edit, Write, WebFetch); sem MCP, sem configurações do usuário
+        '--tools', images.length ? 'Read' : '',
+        ...(images.length ? ['--allowedTools', 'Read', '--add-dir', path.join(dir, 'frames')] : []),
+        '--strict-mcp-config',
+        '--setting-sources', 'local',
+        '--no-session-persistence',
+      ];
+      // Sem chave da API (senão o CLI cobraria por token) e sem as variáveis de uma sessão do Claude Code que
+      // tenha iniciado o worker: o CLI usa o próprio login (assinatura)
+      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(ANTHROPIC_|CLAUDE_CODE_|CLAUDECODE$|CLAUDE_AGENT_SDK)/.test(k))) as NodeJS.ProcessEnv;
+      const res = await runProcess(cli, args, { cwd: dir, env, input: prompt, signal: req.signal, timeoutMs: CLAUDE_CODE_TIMEOUT_MS, stderrTailBytes: 4000 });
+      let json: any = null;
+      try {
+        const parsed = JSON.parse(res.stdout.trim());
+        json = Array.isArray(parsed) ? [...parsed].reverse().find((m) => m?.type === 'result') : parsed;
+      } catch {
+        /* saída não-JSON: tratada abaixo */
+      }
+      const text = String(json?.result ?? '').trim();
+      const errText = `${json?.is_error ? text : ''} ${res.stderrTail}`;
+      if (USAGE_LIMIT_RE.test(errText)) throw new Error('Limite do seu plano do Claude atingido; tente depois que renovar');
+      if (/not logged in|please run \/login|invalid api key/i.test(errText)) throw new Error('Claude Code não está logado: rode "claude auth login" no terminal (uma vez) e tente de novo');
+      if (res.code !== 0 || !json || json.is_error) {
+        if (res.code === null) throw new Error(`Claude Code não respondeu em ${CLAUDE_CODE_TIMEOUT_MS / 60_000} min`);
+        throw new Error(`Claude Code falhou (código ${res.code}): ${(text || res.stderrTail || res.stdout).slice(0, 400)}`);
+      }
+      const u = json.usage ?? {};
+      this.usage.calls++;
+      this.usage.inputTokens += (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+      this.usage.outputTokens += u.output_tokens ?? 0;
+      if (!text) throw new Error('Claude Code sem resposta');
+      return text;
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+}
+
 /** Qual modelo Gemini atende cada papel, conforme o plano escolhido. */
 export function geminiModelFor(settings: AppSettings, role: LLMRole): string {
   if (role === 'select' && settings.geminiPlan === 'hybrid') return settings.geminiProModel || 'gemini-3.1-pro-preview';
@@ -374,6 +494,8 @@ export function createLLM(settings: AppSettings, role: LLMRole = 'edit'): LLMPro
       const model = role === 'select' ? settings.anthropicSelectModel || 'claude-opus-5-5' : settings.anthropicModel || 'claude-sonnet-5-5';
       return new AnthropicProvider(model, key, role === 'select' ? 'high' : role === 'translate' ? 'low' : 'medium');
     }
+    case 'claude-code':
+      return new ClaudeCodeProvider(settings.claudeCodeModel || 'sonnet');
     case 'ollama': {
       const url = settings.ollamaUrl || 'http://127.0.0.1:11434';
       if (!/^https?:\/\/[^\s]+$/i.test(url)) throw new Error(`URL do Ollama inválida: ${url}`);
@@ -400,6 +522,7 @@ export async function pingLLM(settings: AppSettings): Promise<{ ok: boolean; mes
       if (!/ok/i.test(out)) return { ok: false, message: `${llm.model} respondeu algo inesperado: ${out.slice(0, 80)}` };
       msgs.push(`${llm.model} ✓`);
     }
+    if (settings.aiProvider === 'claude-code') return { ok: true, message: `Claude Code instalado e logado — ${msgs.join(' · ')} (usa o limite do seu plano)` };
     return { ok: true, message: `Conexão OK — ${msgs.join(' · ')}` };
   } catch (e) {
     return { ok: false, message: e instanceof Error ? e.message : String(e) };

@@ -1,0 +1,64 @@
+import { z } from 'zod';
+import { createJob, getJob, listClips } from '@clipper/shared/server';
+import { badRequest } from '@/lib/validation';
+
+const t = z.coerce.number().finite().min(0).max(24 * 3600);
+const frac = z.coerce.number().finite().min(0).max(1);
+const name = z.string().trim().min(1).max(200);
+const Box = z.object({ x0: frac, y0: frac, x1: frac, y1: frac }).refine((b) => b.x1 - b.x0 > 0.02 && b.y1 - b.y0 > 0.02, 'caixa pequena demais');
+
+const ManualEditSchema = z.object({
+  segments: z.array(z.object({ start: t, end: t, label: z.string().max(60).nullish() })).min(1).max(8),
+  shots: z.array(z.object({ at: t, duration: z.coerce.number().min(0.3).max(600), type: z.enum(['focus', 'wide']), focusX: frac, focusY: frac, scale: z.coerce.number().min(1).max(2.5) })).max(80),
+  zooms: z.array(z.object({ at: t, duration: z.coerce.number().min(0.3).max(30), scale: z.coerce.number().min(1).max(2), focusX: frac, focusY: frac })).max(80),
+  overlays: z
+    .array(
+      z.object({
+        type: z.enum(['meme', 'image']),
+        category: name,
+        file: name,
+        at: t,
+        duration: z.coerce.number().min(0.3).max(10),
+        position: z.enum(['center', 'top', 'bottom', 'top-left', 'top-right']),
+        scale: z.coerce.number().min(0.1).max(1),
+        audioMode: z.enum(['meme', 'video', 'both']),
+      }),
+    )
+    .max(30),
+  sfx: z.array(z.object({ category: name, file: name, at: t, volume: z.coerce.number().min(0).max(2), duration: z.coerce.number().min(0.3).max(10).optional() })).max(40),
+  camZoom: z.coerce.number().min(0.5).max(3).optional(),
+  frames: z
+    .array(
+      z.object({
+        at: t,
+        end: t,
+        mode: z.enum(['single', 'split']),
+        fit: z.enum(['cover', 'blur']),
+        box: Box,
+        box2: Box.optional(),
+        topRatio: z.coerce.number().min(0.2).max(0.8).optional(),
+      }),
+    )
+    .max(40)
+    .optional(),
+});
+
+/** Cria um job de ajuste com a edição MANUAL do corte (sem IA): o worker só renderiza o plano enviado. */
+export async function POST(req: Request, { params }: { params: Promise<{ id: string; index: string }> }) {
+  try {
+    const { id, index } = await params;
+    const manual = ManualEditSchema.parse(await req.json());
+    const parent = getJob(id);
+    if (!parent) return Response.json({ error: 'Job não encontrado' }, { status: 404 });
+    const clipIndex = Number(index);
+    const clip = listClips(id).find((c) => c.index === clipIndex);
+    if (!clip || clip.status !== 'completed') return Response.json({ error: 'Corte não encontrado ou ainda não renderizado' }, { status: 409 });
+    const job = createJob(parent.inputPath, `Edição manual do corte ${clipIndex + 1} — ${parent.videoName}`.slice(0, 200), {
+      ...parent.settings,
+      revision: { parentJobId: id, clipIndex, comment: 'Edição manual', manual },
+    });
+    return Response.json({ job }, { status: 201 });
+  } catch (e) {
+    return badRequest(e);
+  }
+}
