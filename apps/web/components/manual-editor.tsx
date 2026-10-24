@@ -126,7 +126,14 @@ export function ManualEditor({ clip, onClose, onQueued }: { clip: Clip; onClose:
         d.sfx = d.sfx.map(mv);
         d.zooms = d.zooms.map(mv);
         d.shots = d.shots.map(mv);
+        // Enquadramentos também: as trocas depois do começo deste trecho andam junto
+        if (d.frames) {
+          const mvT = (t: number) => (t > offset + 0.001 ? Math.max(offset, Math.round((t + shift) * 100) / 100) : t);
+          d.frames = d.frames.map((f) => ({ ...f, at: mvT(f.at), end: mvT(f.end) }));
+        }
       }
+      // Os enquadramentos sempre cobrem o corte inteiro: o tempo ganho no começo/fim entra no vizinho e pode ser editado
+      if (d.frames?.length) d.frames = fitFrames(d.frames, d.segments.reduce((a, s) => a + (s.end - s.start), 0));
       return d;
     });
   }

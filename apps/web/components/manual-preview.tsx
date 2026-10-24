@@ -3,7 +3,7 @@
 // (mesmas regras do renderizador: preencher / inteiro com fundo desfocado / câmera + conteúdo), os zooms, os
 // memes e os sons. Também traz o editor de quadros: caixas arrastáveis sobre o quadro original, por trecho.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pause, Play, Scissors, Trash2, ZoomIn, ZoomOut } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Pause, Play, Scissors, Trash2, ZoomIn, ZoomOut } from 'lucide-react';
 import type { FrameBox, ManualEdit, ManualFrame } from '@clipper/shared';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -25,6 +25,8 @@ export interface ClipPlayer {
   seek: (t: number) => void;
   /** Tempo atual do corte (lido na hora, sem esperar o React). */
   now: () => number;
+  /** Tempo do corte → segundo no arquivo da prévia (para tirar miniaturas). */
+  toSource: (t: number) => number;
 }
 
 /** offset = segundo do vídeo original em que o arquivo da prévia começa (cópia leve só da parte usada). */
@@ -123,7 +125,19 @@ export function useClipPlayer(segments: Segment[], offset = 0, ready = true): Cl
       setPlaying(false);
     }
   };
-  return { video, t, total, playing, vw: dims.vw, vh: dims.vh, toggle, seek, now: clipTime };
+  const toSource = useCallback(
+    (ct: number) => {
+      const tt = clamp(ct, 0, total);
+      let i = segments.length - 1;
+      for (let k = 0; k < segments.length; k++) if (tt < offsets[k] + (segments[k].end - segments[k].start)) {
+        i = k;
+        break;
+      }
+      return segments[i] ? Math.max(0, segments[i].start - offset + (tt - offsets[i])) : 0;
+    },
+    [segments, offsets, total, offset],
+  );
+  return { video, t, total, playing, vw: dims.vw, vh: dims.vh, toggle, seek, now: clipTime, toSource };
 }
 
 // ---------------- Enquadramento: padrão a partir do que a IA fez ----------------
@@ -410,7 +424,9 @@ export function FramingEditor({
   const area = useRef<HTMLDivElement>(null);
   const drag = useRef<Drag | null>(null);
   const { vw, vh } = player;
-  const idx = Math.max(0, frames.findIndex((f) => player.t >= f.at && player.t < f.end));
+  // Enquadramento do instante atual (no finalzinho do corte, o último)
+  const found = frames.findIndex((f) => player.t >= f.at && player.t < f.end);
+  const idx = found >= 0 ? found : player.t >= (frames.at(-1)?.end ?? 0) - 0.01 ? frames.length - 1 : 0;
   const fr = frames[idx];
 
   // Quadro original (o frame atual inteiro), para posicionar as caixas
@@ -500,8 +516,8 @@ export function FramingEditor({
     setFrame({ [which]: nb } as Partial<ManualFrame>);
   };
   const splitHere = () => {
-    const t = Math.round(player.now() * 10) / 10;
-    if (t - fr.at < 0.5 || fr.end - t < 0.5) return;
+    const t = Math.round(player.now() * 100) / 100;
+    if (t - fr.at < 0.2 || fr.end - t < 0.2) return;
     onChange([...frames.slice(0, idx), { ...fr, end: t }, { ...structuredClone(fr), at: t }, ...frames.slice(idx + 1)]);
   };
   const removeHere = () => {
@@ -518,21 +534,8 @@ export function FramingEditor({
 
   return (
     <div className="space-y-2">
-      {/* Linha do tempo dos enquadramentos */}
-      <div className="relative h-7 overflow-hidden rounded-md border bg-muted/40">
-        {frames.map((f, i) => (
-          <button
-            key={i}
-            className={cn('absolute inset-y-0 border-r border-background text-[10px]', i === idx ? 'bg-primary/40 font-semibold' : 'bg-primary/10 hover:bg-primary/20')}
-            style={{ left: `${(f.at / player.total) * 100}%`, width: `${((f.end - f.at) / player.total) * 100}%` }}
-            onClick={() => player.seek(f.at + 0.01)}
-            title={`${f.at.toFixed(1)}–${f.end.toFixed(1)}s`}
-          >
-            {f.mode === 'split' ? '▤' : '▢'} {f.at.toFixed(1)}s
-          </button>
-        ))}
-        <div className="pointer-events-none absolute inset-y-0 w-0.5 bg-white" style={{ left: `${(player.t / player.total) * 100}%` }} />
-      </div>
+      {/* Linha do tempo detalhada: miniaturas, zoom, quadro a quadro e bordas arrastáveis */}
+      <FrameTimeline player={player} frames={frames} current={idx} onChange={onChange} />
 
       <div className="flex flex-wrap items-center gap-1.5 text-xs">
         <div className="flex overflow-hidden rounded-md border">
@@ -605,6 +608,210 @@ export function FramingEditor({
       <p className="text-xs text-muted-foreground">
         Arraste a caixa para mudar o que aparece e puxe o canto para aumentar/diminuir (ou use as lupas). Vale para o trecho destacado na linha acima; use <b>Novo enquadramento aqui</b> para mudar só a
         partir de um momento.
+      </p>
+    </div>
+  );
+}
+
+// ---------------- Linha do tempo detalhada ----------------
+
+const FPS = 30;
+
+/**
+ * Linha do tempo grande para escolher exatamente onde cada enquadramento começa: régua de segundos,
+ * miniaturas dos frames, zoom (até ver décimos de segundo), cabeça de leitura arrastável, bordas entre
+ * enquadramentos arrastáveis e avanço quadro a quadro (botões ou ← → no teclado; Shift = 1 s; espaço = tocar).
+ */
+function FrameTimeline({ player, frames, current, onChange }: { player: ClipPlayer; frames: ManualFrame[]; current: number; onChange: (f: ManualFrame[]) => void }) {
+  const [zoom, setZoom] = useState(1);
+  const scroller = useRef<HTMLDivElement>(null);
+  const track = useRef<HTMLDivElement>(null);
+  const [trackW, setTrackW] = useState(800);
+  const [thumbs, setThumbs] = useState<string[]>([]);
+  const drag = useRef<{ kind: 'seek' } | { kind: 'edge'; i: number } | null>(null);
+  const total = Math.max(0.1, player.total);
+
+  useEffect(() => {
+    const el = track.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setTrackW(el.clientWidth));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Miniaturas: um segundo vídeo (escondido) vai a cada instante e desenha num canvas pequeno
+  const thumbCount = Math.min(200, Math.max(10, Math.round(trackW / 90)));
+  useEffect(() => {
+    const src = player.video.current?.currentSrc || player.video.current?.src;
+    if (!src || !player.vw) return;
+    let cancelled = false;
+    const v = document.createElement('video');
+    v.muted = true;
+    v.preload = 'auto';
+    v.src = src;
+    const c = document.createElement('canvas');
+    c.height = 54;
+    c.width = Math.round((54 * player.vw) / player.vh);
+    const out: string[] = [];
+    (async () => {
+      await new Promise((r) => v.addEventListener('loadeddata', r, { once: true }));
+      for (let k = 0; k < thumbCount && !cancelled; k++) {
+        v.currentTime = player.toSource(((k + 0.5) / thumbCount) * total);
+        await new Promise((r) => v.addEventListener('seeked', r, { once: true }));
+        c.getContext('2d')!.drawImage(v, 0, 0, c.width, c.height);
+        out.push(c.toDataURL('image/jpeg', 0.6));
+        if (k % 8 === 7 || k === thumbCount - 1) setThumbs([...out]);
+      }
+    })().catch(() => undefined);
+    return () => {
+      cancelled = true;
+      v.removeAttribute('src');
+      v.load();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [player.vw, total, thumbCount, player.toSource]);
+
+  // Com zoom, a linha acompanha a cabeça de leitura
+  useEffect(() => {
+    const sc = scroller.current;
+    if (!sc || zoom <= 1) return;
+    const x = (player.t / total) * trackW;
+    if (x < sc.scrollLeft + 40 || x > sc.scrollLeft + sc.clientWidth - 40) sc.scrollLeft = x - sc.clientWidth / 2;
+  }, [player.t, zoom, total, trackW]);
+
+  const timeAt = (clientX: number) => {
+    const r = track.current!.getBoundingClientRect();
+    return clamp(((clientX - r.left) / r.width) * total, 0, total);
+  };
+  const step = (dt: number) => player.seek(Math.round((player.now() + dt) * 1000) / 1000);
+  const moveEdge = (i: number, t: number) => {
+    // Borda entre o enquadramento i e o i+1 (mínimo 0,2 s para cada lado)
+    const a = frames[i];
+    const b = frames[i + 1];
+    const tt = Math.round(clamp(t, a.at + 0.2, b.end - 0.2) * 100) / 100;
+    onChange(frames.map((f, k) => (k === i ? { ...f, end: tt } : k === i + 1 ? { ...f, at: tt } : f)));
+  };
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      step((e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 1 : 1 / FPS));
+    } else if (e.key === ' ') {
+      e.preventDefault();
+      player.toggle();
+    }
+  };
+
+  // Régua: marcas a cada 0,1 / 0,5 / 1 / 5 / 10 s conforme o zoom; rótulos onde cabem
+  const pps = trackW / total;
+  const tick = pps > 400 ? 0.1 : pps > 120 ? 0.5 : pps > 30 ? 1 : pps > 12 ? 5 : 10;
+  const label = pps * tick >= 50 ? tick : pps * tick * 5 >= 50 ? tick * 5 : tick * 10;
+  const ticks = Array.from({ length: Math.floor(total / tick) + 1 }, (_, k) => +(k * tick).toFixed(2));
+  const pct = (t: number) => `${(t / total) * 100}%`;
+
+  return (
+    <div className="space-y-1.5 rounded-lg border p-2 outline-none focus-visible:ring-2 focus-visible:ring-ring" tabIndex={0} onKeyDown={onKey}>
+      <div className="flex flex-wrap items-center gap-1 text-xs">
+        <Button size="icon" variant="outline" className="size-7" title="Voltar 1 s (Shift+←)" onClick={() => step(-1)}>
+          <ChevronsLeft className="size-4" />
+        </Button>
+        <Button size="icon" variant="outline" className="size-7" title="Voltar 1 quadro (←)" onClick={() => step(-1 / FPS)}>
+          <ChevronLeft className="size-4" />
+        </Button>
+        <Button size="icon" variant="outline" className="size-7" title={player.playing ? 'Pausar (espaço)' : 'Tocar (espaço)'} onClick={player.toggle}>
+          {player.playing ? <Pause className="size-3.5" /> : <Play className="size-3.5" />}
+        </Button>
+        <Button size="icon" variant="outline" className="size-7" title="Avançar 1 quadro (→)" onClick={() => step(1 / FPS)}>
+          <ChevronRight className="size-4" />
+        </Button>
+        <Button size="icon" variant="outline" className="size-7" title="Avançar 1 s (Shift+→)" onClick={() => step(1)}>
+          <ChevronsRight className="size-4" />
+        </Button>
+        <span className="ml-1 rounded bg-muted px-1.5 py-0.5 font-mono">
+          {player.t.toFixed(2)}s <span className="text-muted-foreground">/ {total.toFixed(2)}s</span>
+        </span>
+        <span className="ml-auto flex items-center gap-1 text-muted-foreground">
+          <ZoomOut className="size-3.5" />
+          <input type="range" min={1} max={20} step={0.5} value={zoom} onChange={(e) => setZoom(Number(e.target.value))} className="w-28 accent-primary" title="Zoom da linha do tempo" />
+          <ZoomIn className="size-3.5" />
+          <b className="w-9 font-mono text-foreground">{zoom}x</b>
+        </span>
+      </div>
+
+      <div ref={scroller} className="overflow-x-auto pb-1">
+        <div
+          ref={track}
+          className="relative h-[104px] cursor-crosshair touch-none select-none"
+          style={{ width: `${100 * zoom}%` }}
+          onPointerDown={(e) => {
+            (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+            drag.current = { kind: 'seek' };
+            player.seek(timeAt(e.clientX));
+          }}
+          onPointerMove={(e) => {
+            const d = drag.current;
+            if (!d) return;
+            if (d.kind === 'seek') player.seek(timeAt(e.clientX));
+            else moveEdge(d.i, timeAt(e.clientX));
+          }}
+          onPointerUp={() => (drag.current = null)}
+          onPointerCancel={() => (drag.current = null)}
+        >
+          {/* Régua */}
+          <div className="absolute inset-x-0 top-0 h-5 border-b">
+            {ticks.map((t) => {
+              const major = Math.abs(t / label - Math.round(t / label)) < 1e-6;
+              return (
+                <div key={t} className="absolute top-0 h-full" style={{ left: pct(t) }}>
+                  <div className={cn('w-px bg-foreground/30', major ? 'h-full' : 'h-1.5')} />
+                  {major && <span className="absolute top-0 left-1 font-mono text-[10px] whitespace-nowrap text-muted-foreground">{t % 1 ? t.toFixed(1) : t}s</span>}
+                </div>
+              );
+            })}
+          </div>
+          {/* Miniaturas dos frames */}
+          <div className="absolute inset-x-0 top-5 h-[54px] overflow-hidden bg-black/60">
+            {thumbs.map((url, k) => (
+              <img key={k} src={url} alt="" draggable={false} className="absolute top-0 h-full object-cover" style={{ left: `${(k / thumbCount) * 100}%`, width: `${100 / thumbCount}%` }} />
+            ))}
+          </div>
+          {/* Enquadramentos */}
+          <div className="absolute inset-x-0 top-[78px] h-6">
+            {frames.map((f, i) => (
+              <div
+                key={i}
+                className={cn('absolute inset-y-0 overflow-hidden border-r-2 border-background px-1 text-[10px] leading-6 whitespace-nowrap', i === current ? 'bg-primary/60 font-semibold text-primary-foreground' : 'bg-primary/20')}
+                style={{ left: pct(f.at), width: pct(f.end - f.at) }}
+                title={`${f.at.toFixed(2)}–${f.end.toFixed(2)}s`}
+              >
+                {f.mode === 'split' ? '▤' : '▢'} {f.at.toFixed(2)}s
+              </div>
+            ))}
+          </div>
+          {/* Bordas arrastáveis entre enquadramentos */}
+          {frames.slice(0, -1).map((f, i) => (
+            <div
+              key={`e${i}`}
+              className="absolute top-5 bottom-0 z-10 -ml-1.5 w-3 cursor-ew-resize"
+              style={{ left: pct(f.end) }}
+              title="Arraste para mudar onde este enquadramento troca"
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+                drag.current = { kind: 'edge', i };
+              }}
+            >
+              <div className="mx-auto h-full w-1 rounded bg-yellow-400 shadow" />
+            </div>
+          ))}
+          {/* Cabeça de leitura */}
+          <div className="pointer-events-none absolute top-0 bottom-0 z-20 w-0.5 bg-red-500" style={{ left: pct(player.t) }}>
+            <div className="-ml-1.5 size-3.5 rounded-sm bg-red-500" />
+          </div>
+        </div>
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        Clique ou arraste na linha para ir a um instante · ← → um quadro, Shift+← → um segundo, espaço toca/pausa · arraste as barras amarelas para mudar onde o enquadramento troca · aumente o zoom para
+        enxergar quadro a quadro.
       </p>
     </div>
   );
