@@ -255,6 +255,11 @@ export function updateJobProgress(id: string, step: string, progress: number): v
     .run(step, Math.max(0, Math.min(1, progress)), now(), id);
 }
 
+/** Troca o nome mostrado do job (ex.: o título do VOD, que só se sabe depois de consultar a Twitch). */
+export function renameJob(id: string, videoName: string): void {
+  getDb().prepare('UPDATE jobs SET video_name = ?, updated_at = ? WHERE id = ?').run(videoName.slice(0, 200), now(), id);
+}
+
 export function setJobResult(id: string, result: JobResult): void {
   getDb().prepare('UPDATE jobs SET result_json = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(result), now(), id);
 }

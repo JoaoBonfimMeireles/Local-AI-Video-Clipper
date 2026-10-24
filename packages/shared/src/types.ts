@@ -92,6 +92,10 @@ export interface JobSettings {
   revision?: { parentJobId: string; clipIndex: number; comment: string; favoriteId?: string; manual?: ManualEdit } | null;
   /** Job que só analisa os clipes de referência (gera o guia de estilo), sem vídeo de entrada. */
   analyzeReferences?: boolean;
+  /** Job que analisa um VOD da Twitch pela URL (chat + áudio, sem baixar o vídeo) e acha os melhores momentos. */
+  vodAnalysis?: { url: string } | null;
+  /** Cortes de um VOD da Twitch: antes do pipeline, baixa só estes trechos (s do VOD) e junta no arquivo de entrada. */
+  vodSource?: { vodId: string; url: string; sections: { start: number; end: number; label?: string | null }[] } | null;
   /** Modo Twitch: quais tipos de momento procurar. */
   twitchCategories: TwitchCategory[];
   twitchLayout: TwitchLayout;
@@ -270,6 +274,8 @@ export interface JobResult {
   language?: string;
   clipsRendered?: number;
   clipsFailed?: number;
+  /** Análise de VOD da Twitch: id do VOD (resultado em data/vods/<id>/peaks.json). */
+  vodId?: string;
 }
 
 export interface JobLog {

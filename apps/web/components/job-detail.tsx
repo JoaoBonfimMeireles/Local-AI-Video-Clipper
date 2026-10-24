@@ -201,6 +201,26 @@ export function JobDetail({ id }: { id: string }) {
         </Card>
       </div>
 
+      {job.settings.vodAnalysis && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Melhores momentos do VOD</CardTitle>
+            <CardDescription>
+              {job.status === 'completed' && job.result?.vodId
+                ? 'Análise pronta: veja o calor da live, assista cada momento e aprove os que viram cortes.'
+                : 'Lendo o chat e o áudio da live inteira (o vídeo não é baixado)…'}
+            </CardDescription>
+          </CardHeader>
+          {job.status === 'completed' && job.result?.vodId && (
+            <CardContent>
+              <Link href={`/vods/${job.result.vodId}`} className={buttonVariants({})}>
+                Revisar os momentos e aprovar
+              </Link>
+            </CardContent>
+          )}
+        </Card>
+      )}
+
       {job.result?.outputDir && job.status === 'completed' && <VideoInfo outputDir={job.result.outputDir} />}
       {job.settings.reference && <AssetRequests jobId={job.id} canRerender={job.status === 'completed' || job.status === 'failed'} />}
 

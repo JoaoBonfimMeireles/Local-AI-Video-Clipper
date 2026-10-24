@@ -42,6 +42,9 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
   const [dragging, setDragging] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<{ type: 'ok' | 'error'; text: string } | null>(null);
+  // Origem: arquivo local ou URL de um VOD da Twitch (analisado pelo chat/áudio antes de baixar)
+  const [source, setSource] = useState<'file' | 'twitch'>('file');
+  const [vodUrl, setVodUrl] = useState('');
   const fileInput = useRef<HTMLInputElement>(null);
 
   const set = <K extends keyof JobSettings>(k: K, v: JobSettings[K]) => setSettings((s) => ({ ...s, [k]: v }));
@@ -107,6 +110,22 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
   }
 
   async function submit() {
+    if (source === 'twitch') {
+      if (!/twitch\.tv\/(?:[^/]+\/)?videos?\/\d+|^\d{6,12}$/.test(vodUrl.trim())) return setMessage({ type: 'error', text: 'Cole o link de um VOD, como https://www.twitch.tv/videos/123456789' });
+      setSubmitting(true);
+      setMessage(null);
+      try {
+        await api('/api/vods', { method: 'POST', body: JSON.stringify({ url: vodUrl.trim(), settings }) });
+        setMessage({ type: 'ok', text: 'Análise do VOD na fila! Quando terminar, abra o job para revisar os momentos e aprovar.' });
+        setVodUrl('');
+        onCreated();
+      } catch (e) {
+        setMessage({ type: 'error', text: (e as Error).message });
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
     if (!selected) return setMessage({ type: 'error', text: 'Selecione ou envie um vídeo.' });
     if (settings.reference && !settings.reference.clipFile) return setMessage({ type: 'error', text: 'Escolha o corte viral de referência.' });
     setSubmitting(true);
@@ -133,6 +152,23 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
       <CardContent className="space-y-6">
         {/* 1. Vídeo */}
         <section className="space-y-3">
+          <div className="flex overflow-hidden rounded-lg border text-sm">
+            {(['file', 'twitch'] as const).map((k) => (
+              <button key={k} type="button" className={cn('flex-1 px-3 py-2', source === k ? 'bg-primary text-primary-foreground' : 'hover:bg-muted')} onClick={() => setSource(k)}>
+                {k === 'file' ? 'Vídeo do computador' : 'Link de VOD da Twitch'}
+              </button>
+            ))}
+          </div>
+          {source === 'twitch' ? (
+            <div className="space-y-1.5">
+              <Label>URL do VOD</Label>
+              <Input value={vodUrl} onChange={(e) => setVodUrl(e.target.value)} placeholder="https://www.twitch.tv/videos/123456789" />
+              <p className="text-xs text-muted-foreground">
+                O app lê o chat e o áudio da live inteira (sem baixar o vídeo), acha os 15 melhores momentos e mostra para você revisar. Só os momentos aprovados são baixados e viram cortes.
+              </p>
+            </div>
+          ) : (
+          <>
           <div
             onDragOver={(e) => {
               e.preventDefault();
@@ -197,6 +233,8 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
               onRange={(r) => set('range', r)}
               onLayout={(l) => set('manualLayout', l)}
             />
+          )}
+          </>
           )}
         </section>
 
@@ -473,10 +511,10 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
 
         {message && <p className={cn('rounded-md px-3 py-2 text-sm', message.type === 'ok' ? 'bg-success/10 text-success' : 'bg-destructive/10 text-destructive')}>{message.text}</p>}
 
-        <Button size="lg" className="w-full" onClick={submit} disabled={submitting || !selected || !!upload}>
+        <Button size="lg" className="w-full" onClick={submit} disabled={submitting || (source === 'twitch' ? !vodUrl.trim() : !selected || !!upload)}>
           {submitting ? <Loader2 className="animate-spin" /> : <Play />}
-          Iniciar processamento
-          {selected && (
+          {source === 'twitch' ? 'Analisar VOD (chat + áudio)' : 'Iniciar processamento'}
+          {source === 'file' && selected && (
             <span className="ml-1 flex min-w-0 items-center gap-1 truncate text-xs opacity-80">
               <FileVideo className="size-3" />
               {selected}

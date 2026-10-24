@@ -17,6 +17,7 @@ import {
 import { runPipeline } from './pipeline';
 import { runReferenceJob } from './references';
 import { runRevision } from './revise';
+import { prepareVodSource, runVodAnalysis } from './twitch-vod';
 
 loadRootEnv();
 const POLL_MS = Number(process.env.WORKER_POLL_MS) || 2000;
@@ -85,6 +86,15 @@ async function main() {
     }, 1500);
     const t0 = Date.now();
     try {
+      // Análise de VOD da Twitch: não renderiza cortes, só acha os momentos para revisão
+      if (job.settings.vodAnalysis) {
+        const vodId = await runVodAnalysis(job, ac.signal);
+        finishJob(job.id, 'completed');
+        addJobLog(job.id, 'info', `Análise do VOD ${vodId} concluída em ${((Date.now() - t0) / 1000).toFixed(0)}s`);
+        continue;
+      }
+      // Cortes de VOD: baixa só os trechos aprovados antes do pipeline normal
+      if (job.settings.vodSource) await prepareVodSource(job, ac.signal);
       const { rendered, failed } = job.settings.analyzeReferences
         ? await runReferenceJob(job, ac.signal)
         : job.settings.revision

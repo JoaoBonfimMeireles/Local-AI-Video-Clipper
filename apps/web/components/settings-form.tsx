@@ -137,10 +137,10 @@ export function SettingsForm() {
             {settings.aiProvider === 'anthropic' && (
               <div className="grid gap-3 sm:grid-cols-2">
                 <Field label="Modelo que escolhe os cortes (o mais capaz)">
-                  <Input value={settings.anthropicSelectModel} onChange={(e) => set('anthropicSelectModel', e.target.value)} placeholder="claude-opus-5-5" />
+                  <ModelSelect value={settings.anthropicSelectModel} options={API_MODELS} onChange={(v) => set('anthropicSelectModel', v)} />
                 </Field>
                 <Field label="Modelo de edição, títulos e tradução">
-                  <Input value={settings.anthropicModel} onChange={(e) => set('anthropicModel', e.target.value)} placeholder="claude-sonnet-5-5" />
+                  <ModelSelect value={settings.anthropicModel} options={API_MODELS} onChange={(v) => set('anthropicModel', v)} />
                 </Field>
                 <p className="text-xs text-muted-foreground sm:col-span-2">
                   Opus 5.5 (US$ 4 / 20 por 1M tokens) pensa a seleção com calma; Sonnet 5.5 (US$ 2 / 10) faz o resto. Um vídeo de 10–30 min costuma custar entre US$ 0,20 e 1,00 (o custo estimado aparece no log de cada job).
@@ -151,7 +151,7 @@ export function SettingsForm() {
             {settings.aiProvider === 'claude-code' && (
               <div className="grid gap-3 sm:grid-cols-2">
                 <Field label="Modelo">
-                  <Input value={settings.claudeCodeModel} onChange={(e) => set('claudeCodeModel', e.target.value)} placeholder="sonnet" />
+                  <ModelSelect value={settings.claudeCodeModel} options={PLAN_MODELS} onChange={(v) => set('claudeCodeModel', v)} />
                 </Field>
                 <div className="flex items-end">
                   <Button type="button" variant="outline" onClick={test} disabled={testing}>
@@ -551,6 +551,32 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
       {children}
       {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
     </div>
+  );
+}
+
+/** Modelos Claude: do que gasta menos para o que gasta mais. */
+const PLAN_MODELS = [
+  { value: 'haiku', label: 'Haiku — gasta menos do plano (bom para textos e ajustes)' },
+  { value: 'sonnet', label: 'Sonnet — equilíbrio (recomendado para escolher cortes)' },
+  { value: 'opus', label: 'Opus — o mais capaz, gasta bem mais do plano' },
+];
+const API_MODELS = [
+  { value: 'claude-haiku-5-5', label: 'Haiku 5.5 — o mais barato' },
+  { value: 'claude-sonnet-5-5', label: 'Sonnet 5.5 — equilíbrio' },
+  { value: 'claude-opus-5-5', label: 'Opus 5.5 — o mais capaz' },
+];
+
+function ModelSelect({ value, options, onChange }: { value: string; options: { value: string; label: string }[]; onChange: (v: string) => void }) {
+  // Um valor antigo digitado à mão continua aparecendo (e selecionado) até ser trocado
+  const all = options.some((o) => o.value === value) || !value ? options : [...options, { value, label: value }];
+  return (
+    <Select value={value} onChange={(e) => onChange(e.target.value)}>
+      {all.map((o) => (
+        <option key={o.value} value={o.value}>
+          {o.label}
+        </option>
+      ))}
+    </Select>
   );
 }
 
