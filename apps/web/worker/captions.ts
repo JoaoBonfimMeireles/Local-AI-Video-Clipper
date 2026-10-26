@@ -37,15 +37,17 @@ export async function translateCaptions(args: {
   const out: Record<number, ClipCaptions> = {};
   for (const c of args.clips) out[c.index] = { cues: {}, labels: {} };
   const src = (args.sourceLang || 'pt').slice(0, 2).toLowerCase();
-  for (const lang of CAPTION_LANGS) {
+  // Os idiomas são independentes: traduzidos ao mesmo tempo (cada um continua sendo uma chamada)
+  await Promise.all(
+    CAPTION_LANGS.map(async (lang) => {
     if (lang.code === src) {
       for (const c of args.clips) {
         out[c.index].cues[lang.code] = c.cues;
         out[c.index].labels[lang.code] = c.labels ?? [];
       }
-      continue;
+      return;
     }
-    if (!args.llm) continue;
+    if (!args.llm) return;
     // Ids sequenciais: blocos de todos os cortes e, depois, os títulos do Top N
     const items: { id: number; text: string }[] = [];
     const where: { clip: number; kind: 'cue' | 'label'; i: number }[] = [];
@@ -59,7 +61,7 @@ export async function translateCaptions(args: {
         items.push({ id: items.length, text: label });
       });
     }
-    if (!items.length) continue;
+    if (!items.length) return;
     try {
       const tr = await translateSegments({ llm: args.llm, segments: items, targetLang: lang.prompt, sourceLang: args.sourceLang, guidelines: args.guidelines, signal: args.signal, log: args.log });
       for (const c of args.clips) {
@@ -77,7 +79,8 @@ export async function translateCaptions(args: {
       if (args.signal?.aborted) throw e;
       args.log('warn', `Legendas em ${lang.label} não foram geradas: ${(e as Error).message}`);
     }
-  }
+    }),
+  );
   return out;
 }
 

@@ -1,4 +1,6 @@
 // Tipos compartilhados entre UI, API e worker. Este arquivo não pode importar módulos Node.
+import type { CleanSpec, CleanStems } from './clean';
+import type { CuriosityIdea, CuriosityTemplateKey } from './curiosity';
 
 export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
 export type ClipStatus = 'pending' | 'rendering' | 'completed' | 'failed';
@@ -63,6 +65,33 @@ export interface ManualFrame {
   box: FrameBox;
   box2?: FrameBox;
   topRatio?: number;
+  /** Encaixe do bloco de cima no modo split (padrão: preencher). */
+  fitTop?: 'cover' | 'blur';
+  /** Posição do conteúdo dentro do bloco quando ele aparece inteiro (0 = esquerda/topo, 1 = direita/base; padrão 0,5). */
+  alignTop?: { x: number; y: number };
+  alignBottom?: { x: number; y: number };
+  /** Segundo conteúdo ao lado, no bloco de cima / de baixo (no modo "Um quadro", sideTop vale para a tela). */
+  sideTop?: FrameSide | null;
+  sideBottom?: FrameSide | null;
+}
+
+/**
+ * Conteúdo extra ao lado no mesmo bloco: uma imagem, outro vídeo de data/input ou outra cena do vídeo original
+ * (outro momento e/ou outra área). Divide a largura do bloco com o conteúdo principal.
+ */
+export interface FrameSide {
+  kind: 'image' | 'video' | 'scene';
+  /** Caminho absoluto (imagem da biblioteca ou vídeo de data/input). Em 'scene' o render usa o vídeo original. */
+  file?: string;
+  /** Vídeo/cena: segundo do arquivo mostrado no início deste enquadramento. */
+  start?: number;
+  /** Cena: área do vídeo original (frações). */
+  box?: FrameBox;
+  side: 'left' | 'right';
+  /** Fração da largura do bloco ocupada por este conteúdo (0,2 a 0,8). */
+  width: number;
+  fit: 'cover' | 'blur';
+  align?: { x: number; y: number };
 }
 
 /** Parâmetros editoriais de um job (o que o painel envia). */
@@ -103,8 +132,27 @@ export interface JobSettings {
   range?: { start: number; end: number } | null;
   /** Áreas marcadas à mão no painel (câmera do streamer e conteúdo do react). */
   manualLayout?: ManualLayout | null;
+  /**
+   * Canal de curiosidades. analyze: só transcreve e gera ideias (sem render) a partir dos formatos escolhidos;
+   * ideas: renderiza estas ideias (trechos aprovados/ajustados no painel), com o narrador opcional.
+   */
+  curiosity?: CuriosityJob | null;
+  /** Canal de memes: transcreve as falas ou renderiza o compilado do projeto (data/meme-studio/projects). */
+  meme?: { projectId: string; action: 'transcribe' | 'render' } | null;
+  /** Limpar vídeo: corta trechos, tira música/legenda/logo etc. e gera data/output/limpos/<job>.mp4. */
+  clean?: CleanSpec | null;
   /** Sessão "a partir de um corte viral": o corte de outra pessoa serve de modelo e o vídeo de entrada é o original. */
   reference?: ReferenceJob | null;
+}
+
+export interface CuriosityJob {
+  /** targetSeconds: duração alvo de cada vídeo (30 ou 60s): roteiro e trechos cabem nela. */
+  analyze?: { templates: CuriosityTemplateKey[]; count: number; topic?: string; targetSeconds?: number } | null;
+  ideas?: CuriosityIdea[] | null;
+  /** Personagem 2D no canto inferior esquerdo narrando o roteiro (TTS local). */
+  narrator?: boolean;
+  /** Job de análise de onde as ideias vieram. */
+  sourceJobId?: string;
 }
 
 /**
@@ -276,6 +324,10 @@ export interface JobResult {
   clipsFailed?: number;
   /** Análise de VOD da Twitch: id do VOD (resultado em data/vods/<id>/peaks.json). */
   vodId?: string;
+  /** Limpar vídeo: arquivo final limpo. */
+  cleanOutput?: string;
+  /** Limpar vídeo: faixas separadas para baixar. */
+  cleanStems?: CleanStems;
 }
 
 export interface JobLog {

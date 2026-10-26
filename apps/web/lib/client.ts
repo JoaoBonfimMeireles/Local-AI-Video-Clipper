@@ -13,15 +13,24 @@ export function fileUrl(absPath: string, download = false) {
 }
 
 /** Busca periódica simples (o "tempo real" do dashboard). */
-export function usePolling<T>(fetcher: () => Promise<T>, intervalMs: number, deps: unknown[] = []) {
+/**
+ * Consulta periódica (pausa com a aba escondida). `intervalMs` pode ser uma função do último resultado: ex. rápido
+ * enquanto há job rodando e devagar quando está tudo parado.
+ */
+export function usePolling<T>(fetcher: () => Promise<T>, intervalMs: number | ((data: T | null) => number), deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
+  const dataRef = useRef<T | null>(null);
+  const intervalRef = useRef(intervalMs);
+  intervalRef.current = intervalMs;
 
   const refresh = useCallback(async () => {
     try {
-      setData(await fetcherRef.current());
+      const d = await fetcherRef.current();
+      dataRef.current = d;
+      setData(d);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -34,7 +43,8 @@ export function usePolling<T>(fetcher: () => Promise<T>, intervalMs: number, dep
     const tick = async () => {
       if (!alive) return;
       if (document.visibilityState === 'visible') await refresh();
-      timer = setTimeout(tick, intervalMs);
+      const ms = intervalRef.current;
+      timer = setTimeout(tick, typeof ms === 'function' ? ms(dataRef.current) : ms);
     };
     tick();
     return () => {
@@ -42,7 +52,7 @@ export function usePolling<T>(fetcher: () => Promise<T>, intervalMs: number, dep
       clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [intervalMs, refresh, ...deps]);
+  }, [typeof intervalMs === 'number' ? intervalMs : 0, refresh, ...deps]);
 
   return { data, error, refresh };
 }

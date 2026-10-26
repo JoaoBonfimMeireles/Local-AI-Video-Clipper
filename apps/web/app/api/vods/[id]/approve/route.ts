@@ -15,7 +15,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   try {
     const { id } = await params;
     if (!/^\d{6,12}$/.test(id)) return badRequest(new Error('VOD inválido'));
-    const { ranks } = z.object({ ranks: z.array(z.coerce.number().int().min(1)).min(1).max(30) }).parse(await req.json());
+    const { ranks } = z.object({ ranks: z.array(z.coerce.number().int().min(1)).min(1).max(60) }).parse(await req.json());
     const file = path.join(dataPaths.root, 'vods', id, 'peaks.json');
     if (!fs.existsSync(file)) return badRequest(new Error('Este VOD ainda não foi analisado.'));
     const peaks = JSON.parse(fs.readFileSync(file, 'utf8'));

@@ -1,11 +1,30 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { z } from 'zod';
-import { createJob, getJob, listClips } from '@clipper/shared/server';
+import { createJob, dataPaths, getJob, isInside, listClips } from '@clipper/shared/server';
 import { badRequest } from '@/lib/validation';
 
 const t = z.coerce.number().finite().min(0).max(24 * 3600);
 const frac = z.coerce.number().finite().min(0).max(1);
 const name = z.string().trim().min(1).max(200);
 const Box = z.object({ x0: frac, y0: frac, x1: frac, y1: frac }).refine((b) => b.x1 - b.x0 > 0.02 && b.y1 - b.y0 > 0.02, 'caixa pequena demais');
+
+const Align = z.object({ x: z.coerce.number().min(0).max(1), y: z.coerce.number().min(0).max(1) });
+/** Conteúdo ao lado: só arquivos de data/input ou da biblioteca (imagens/memes). */
+const Side = z.object({
+  kind: z.enum(['image', 'video', 'scene']),
+  file: z
+    .string()
+    .max(1000)
+    .refine((f) => [dataPaths.input, dataPaths.images, dataPaths.memes].some((d) => isInside(d, path.resolve(f))) && fs.existsSync(f), 'Arquivo do conteúdo ao lado não encontrado')
+    .optional(),
+  start: z.coerce.number().min(0).max(86400).optional(),
+  box: Box.optional(),
+  side: z.enum(['left', 'right']),
+  width: z.coerce.number().min(0.2).max(0.8),
+  fit: z.enum(['cover', 'blur']),
+  align: Align.optional(),
+});
 
 const ManualEditSchema = z.object({
   segments: z.array(z.object({ start: t, end: t, label: z.string().max(60).nullish() })).min(1).max(8),
@@ -37,6 +56,11 @@ const ManualEditSchema = z.object({
         box: Box,
         box2: Box.optional(),
         topRatio: z.coerce.number().min(0.2).max(0.8).optional(),
+        fitTop: z.enum(['cover', 'blur']).optional(),
+        alignTop: Align.optional(),
+        alignBottom: Align.optional(),
+        sideTop: Side.nullable().optional(),
+        sideBottom: Side.nullable().optional(),
       }),
     )
     .max(40)

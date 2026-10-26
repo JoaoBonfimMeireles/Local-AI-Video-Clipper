@@ -34,8 +34,13 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   if (!clip?.metadataPath || !fs.existsSync(clip.metadataPath)) return Response.json({ error: 'Corte não encontrado' }, { status: 404 });
   const meta = JSON.parse(fs.readFileSync(clip.metadataPath, 'utf8'));
   const input: string | undefined = meta.renderContext?.input;
-  if (!input || !fs.existsSync(input)) return Response.json({ error: 'Vídeo original não encontrado' }, { status: 404 });
-  if (await browserPlayable(input)) return Response.json({ path: input, offset: 0 });
+  if (!input || !fs.existsSync(input)) {
+    return Response.json(
+      { error: `O vídeo original${input ? ` (${path.basename(input)})` : ''} foi apagado de data/input. O corte pronto continua; para editar de novo, envie o vídeo com esse mesmo nome.` },
+      { status: 404 },
+    );
+  }
+  if (await browserPlayable(input)) return Response.json({ path: input, offset: 0, original: input });
 
   const segs: { start: number; end: number }[] = meta.renderContext.segments ?? [];
   const start = Math.max(0, Math.floor(Math.min(...segs.map((s) => s.start)) - PAD));
@@ -63,5 +68,5 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       return Response.json({ error: `Não consegui preparar a prévia: ${(e as Error).message.slice(-300)}` }, { status: 500 });
     }
   }
-  return Response.json({ path: out, offset: start });
+  return Response.json({ path: out, offset: start, original: input });
 }

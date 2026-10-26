@@ -1,4 +1,4 @@
-import type { AppSettings, JobSettings, LibraryIndex, Transcript, TranscriptWord } from '@clipper/shared';
+import type { AppSettings, CuriosityIdea, CuriosityTemplateKey, JobSettings, LibraryIndex, Transcript, TranscriptWord } from '@clipper/shared';
 import {
   buildPlanPrompt,
   buildSelectionPrompt,
@@ -23,6 +23,9 @@ import {
   buildRecreatePrompt,
   RECREATE_SYSTEM,
   RecreatePlanSchema,
+  buildCuriosityPrompt,
+  CURIOSITY_SYSTEM,
+  CuriosityIdeaListSchema,
 } from '@clipper/editing-planner';
 import type { ClipCandidate } from '@clipper/clip-selection';
 import type { z } from 'zod';
@@ -410,4 +413,47 @@ export async function aiRecreateFromReference(args: {
       : [],
   }));
   return { concept: res.concept, clips };
+}
+
+/** Canal de curiosidades: ideias de vídeos curtos a partir da transcrição, seguindo os formatos escolhidos. */
+export async function aiCuriosityIdeas(args: {
+  llm: LLMProvider;
+  transcript: Transcript;
+  templates: CuriosityTemplateKey[];
+  count: number;
+  topic?: string;
+  targetSeconds?: number;
+  guidelines?: string;
+  signal?: AbortSignal;
+  log: Log;
+}): Promise<{ summary: string; ideas: CuriosityIdea[] }> {
+  const res = await askJson(
+    args.llm,
+    {
+      system: withGuidelines(CURIOSITY_SYSTEM, args.guidelines),
+      prompt: buildCuriosityPrompt({ transcript: args.transcript, templates: args.templates, count: args.count, topic: args.topic, targetSeconds: args.targetSeconds, maxChars: args.llm.maxPromptChars }),
+      temperature: 0.8,
+      maxTokens: 16000,
+      signal: args.signal,
+    },
+    CuriosityIdeaListSchema,
+    args.log,
+  );
+  const dur = args.transcript.duration;
+  const ideas = res.ideas
+    .map((x, i): CuriosityIdea => ({
+      id: `ia${i + 1}`,
+      template: (args.templates.includes(x.template as CuriosityTemplateKey) ? x.template : args.templates[i % args.templates.length]) as CuriosityTemplateKey,
+      title: x.title,
+      hook: x.hook,
+      script: x.script,
+      cta: x.cta,
+      segments: x.segments.map((sg) => ({ start: Math.min(sg.start, dur), end: Math.min(sg.end, dur), label: sg.label ?? null })).filter((sg) => sg.end > sg.start + 1),
+      score: x.score,
+      reason: x.reason,
+      hashtags: x.hashtags.map((h) => (h.startsWith('#') ? h : `#${h}`)),
+      spoiler: x.spoiler,
+    }))
+    .filter((x) => x.segments.length);
+  return { summary: res.summary, ideas };
 }

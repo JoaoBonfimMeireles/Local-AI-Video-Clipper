@@ -1,11 +1,11 @@
 /**
  * Protótipo: melhores momentos de um VOD da Twitch só pela URL (sem baixar o vídeo).
  *   npx tsx scripts/vod-peaks.ts https://www.twitch.tv/videos/123456789 [--sem-audio]
- * Saída em data/vods/<id>/: peaks.json (15 momentos + série de notas) e chart.png (calor da live).
+ * Saída em data/vods/<id>/: peaks.json (20 momentos por filtro + série de notas) e chart.png (calor da live).
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { pickVodMoments, scoreBins, VOD_BIN_SECONDS, type VodBin } from '@clipper/clip-selection';
+import { pickVodMomentsByMode, scoreBins, VOD_BIN_SECONDS, type VodBin } from '@clipper/clip-selection';
 import { formatTimestamp } from '@clipper/shared';
 import { dataPaths, pythonScriptPath, resolvePythonBinary, runProcess } from '@clipper/shared/server';
 import { audioRmsBins, downloadVodAudio, fetchChatBins, fetchVodMeta } from '../apps/web/worker/twitch-vod';
@@ -25,7 +25,8 @@ async function main() {
   // Chat (cacheado: refazer a análise não baixa de novo)
   const chatCache = path.join(dir, 'chat-bins.json');
   let bins: VodBin[];
-  if (fs.existsSync(chatCache)) {
+  // Cache antigo (sem a contagem de comentários de reação) baixa o chat de novo
+  if (fs.existsSync(chatCache) && 'praise' in (JSON.parse(fs.readFileSync(chatCache, 'utf8'))[0] ?? {})) {
     bins = JSON.parse(fs.readFileSync(chatCache, 'utf8'));
     log('info', `Chat reaproveitado do cache (${bins.reduce((a, b) => a + b.msgs, 0).toLocaleString('pt-BR')} mensagens)`);
   } else {
@@ -44,11 +45,11 @@ async function main() {
   }
 
   const scores = scoreBins(bins, { hasAudio: !noAudio });
-  const moments = pickVodMoments(bins, scores, { count: 15, duration: meta.duration });
+  const moments = pickVodMomentsByMode(bins, scores, { count: 20, duration: meta.duration });
   fs.writeFileSync(
     path.join(dir, 'peaks.json'),
     JSON.stringify(
-      { meta, binSeconds: VOD_BIN_SECONDS, generatedAt: new Date().toISOString(), moments, series: scores.map((s) => ({ t: s.t, s: +s.score.toFixed(3), c: +s.chat.toFixed(2), r: +s.react.toFixed(2), a: +s.audio.toFixed(2) })) },
+      { meta, binSeconds: VOD_BIN_SECONDS, generatedAt: new Date().toISOString(), moments, series: scores.map((s) => ({ t: s.t, s: +s.score.toFixed(3), c: +s.chat.toFixed(2), r: +s.react.toFixed(2), m: +s.comment.toFixed(2), a: +s.audio.toFixed(2) })) },
       null,
       1,
     ),

@@ -1,4 +1,4 @@
-import { deleteJob, getJob, listClips, listJobLogs, listRevisions } from '@clipper/shared/server';
+import { purgeJob, getJob, listClips, listJobLogs, listRevisions } from '@clipper/shared/server';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,6 +20,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
 
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const ok = deleteJob(id);
-  return Response.json({ ok }, { status: ok ? 200 : 409 });
+  // Apaga tudo do job (cortes, temporários e caches só dele) para liberar espaço
+  const r = purgeJob(id);
+  return Response.json(r, { status: r.ok ? 200 : 409 });
 }

@@ -6,7 +6,7 @@
 // Twitch desligou; o chat-downloader está sem manutenção. Se a Twitch mudar a GQL, o erro aparece claro.
 import fs from 'node:fs';
 import path from 'node:path';
-import { addMessage, emptyBin, pickVodMoments, scoreBins, VOD_BIN_SECONDS, type VodBin } from '@clipper/clip-selection';
+import { addMessage, emptyBin, pickVodMomentsByMode, scoreBins, VOD_BIN_SECONDS, type VodBin } from '@clipper/clip-selection';
 import { formatTimestamp, type Job } from '@clipper/shared';
 import { addJobLog, dataPaths, renameJob, resolveBinary, resolvePythonBinary, runProcess, setJobResult, updateJobProgress } from '@clipper/shared/server';
 import { runFfmpeg } from '@clipper/video-processing';
@@ -187,7 +187,7 @@ export function vodDir(vodId: string): string {
 }
 
 /**
- * Job "analisar VOD": chat + áudio → 15 melhores momentos em data/vods/<id>/peaks.json. Guarda também os
+ * Job "analisar VOD": chat + áudio → 20 melhores momentos por filtro em data/vods/<id>/peaks.json. Guarda também os
  * parâmetros do formulário, que a aprovação reaproveita para o job de cortes.
  */
 export async function runVodAnalysis(job: Job, signal: AbortSignal): Promise<string> {
@@ -206,7 +206,8 @@ export async function runVodAnalysis(job: Job, signal: AbortSignal): Promise<str
   progress('ingest', 0.1);
   const chatCache = path.join(dir, 'chat-bins.json');
   let bins: VodBin[];
-  if (fs.existsSync(chatCache)) {
+  // Cache antigo (sem a contagem de comentários de reação) baixa o chat de novo
+  if (fs.existsSync(chatCache) && 'praise' in (JSON.parse(fs.readFileSync(chatCache, 'utf8'))[0] ?? {})) {
     bins = JSON.parse(fs.readFileSync(chatCache, 'utf8'));
     log('info', `Chat reaproveitado do cache (${bins.reduce((a, b) => a + b.msgs, 0).toLocaleString('pt-BR')} mensagens)`);
   } else {
@@ -226,7 +227,7 @@ export async function runVodAnalysis(job: Job, signal: AbortSignal): Promise<str
 
   progress('select', 0.9);
   const scores = scoreBins(bins, { hasAudio: true });
-  const moments = pickVodMoments(bins, scores, { count: 15, duration: meta.duration });
+  const moments = pickVodMomentsByMode(bins, scores, { count: 20, duration: meta.duration });
   const { vodAnalysis: _omit, ...settings } = job.settings;
   fs.writeFileSync(
     path.join(dir, 'peaks.json'),
@@ -237,7 +238,7 @@ export async function runVodAnalysis(job: Job, signal: AbortSignal): Promise<str
       analysisJobId: job.id,
       settings,
       moments,
-      series: scores.map((s) => ({ t: s.t, s: +s.score.toFixed(3), c: +s.chat.toFixed(2), r: +s.react.toFixed(2), a: +s.audio.toFixed(2) })),
+      series: scores.map((s) => ({ t: s.t, s: +s.score.toFixed(3), c: +s.chat.toFixed(2), r: +s.react.toFixed(2), m: +s.comment.toFixed(2), a: +s.audio.toFixed(2) })),
     }),
   );
   // O áudio só serve para a análise: libera o espaço

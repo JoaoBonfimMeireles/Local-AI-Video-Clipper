@@ -95,3 +95,26 @@ export function creditLine(s: { creditTitle?: string; creditChannel?: string; cr
     .replace(/\s+/g, ' ')
     .trim();
 }
+
+/**
+ * Executa `fn` para cada item com no máximo `limit` ao mesmo tempo, devolvendo os resultados na ordem original.
+ * O primeiro erro interrompe a fila (as tarefas já em andamento terminam).
+ */
+export async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  let failed: unknown = null;
+  const worker = async () => {
+    while (failed === null && next < items.length) {
+      const i = next++;
+      try {
+        out[i] = await fn(items[i], i);
+      } catch (e) {
+        failed ??= e;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
+  if (failed !== null) throw failed;
+  return out;
+}

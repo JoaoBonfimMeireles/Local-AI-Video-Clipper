@@ -2,7 +2,7 @@
 // Com "acompanhar", a área marcada é o ponto de partida e a detecção local ajusta se a pessoa/o player mudar de lugar.
 import { detectCamBox, detectPlayerBox, type DetectedFace } from '@clipper/ai-providers';
 import type { ClipLayout } from '@clipper/editing-planner';
-import type { FrameBox, ManualLayout } from '@clipper/shared';
+import { mapLimit, type FrameBox, type ManualLayout } from '@clipper/shared';
 
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 const area = (b: FrameBox) => Math.max(0, b.x1 - b.x0) * Math.max(0, b.y1 - b.y0);
@@ -111,15 +111,16 @@ async function detectContentPhases(
   const timed = frames.map((f, i) => ({ ...f, t: f.time ?? i }));
   if (timed.length < 8) return [];
   const last = timed[timed.length - 1].t;
-  const wins: { at: number; end: number; box: FrameBox | null }[] = [];
-  for (let at = 0; at <= last; at += WIN) {
+  const starts: number[] = [];
+  for (let at = 0; at <= last; at += WIN) if (timed.filter((f) => f.t >= at && f.t < at + WIN).length >= 3) starts.push(at);
+  // Janelas independentes: 3 detectores ao mesmo tempo (o resultado mantém a ordem)
+  const wins = await mapLimit(starts, 3, async (at) => {
     const inWin = timed.filter((f) => f.t >= at && f.t < at + WIN);
-    if (inWin.length < 3) continue;
     const p = await detectPlayerBox(inWin.map((f) => f.path), camArea, signal);
     // "Tela cheia": a região que se mexe cresceu bem além da área marcada (≥1,3x maior e ≥30% dela fora da marcação)
     const big = !!p && area(p.box) >= 1.3 * area(marked) && area(p.box) - area(inter(p.box, marked)) >= 0.3 * area(p.box);
-    wins.push({ at, end: Math.min(last + 1, at + WIN), box: big ? p!.box : null });
-  }
+    return { at, end: Math.min(last + 1, at + WIN), box: big ? p!.box : null };
+  });
   // Agrupa janelas seguidas de tela cheia; trechos de uma janela só (≈4s) são ignorados (troca rápida demais)
   const phases: { at: number; end: number; box: FrameBox }[] = [];
   for (let i = 0; i < wins.length; i++) {

@@ -8,3 +8,5 @@ export * from './prepare';
 export * from './assets';
 export * from './content';
 export * from './pauses';
+export * from './meme';
+export * from './clean';

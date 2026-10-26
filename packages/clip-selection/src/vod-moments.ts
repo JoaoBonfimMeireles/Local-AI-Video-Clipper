@@ -1,6 +1,7 @@
 // Melhores momentos de um VOD da Twitch SEM baixar o vídeo: picos de chat (relativos à própria live),
 // reações por tipo de emote e energia do áudio, em janelas de 5 s. Código puro (sem I/O): o worker
 // agrega o chat e o áudio em `VodBin`s e este módulo dá a nota e escolhe os momentos.
+import { LAUGH_LABELS, matchPraise } from './vod-comments';
 
 /** Tamanho de cada janela de análise (s). */
 export const VOD_BIN_SECONDS = 5;
@@ -18,12 +19,13 @@ export const CHAT_REACTIONS: Record<ReactionKind, string[]> = {
   sad: ['F', 'Sadge', 'BibleThump', 'PepeHands', 'NotLikeThis', 'FeelsBadMan', '😭'],
 };
 
-export const REACTION_LABEL: Record<ReactionKind | 'chat' | 'audio', string> = {
+export const REACTION_LABEL: Record<ReactionKind | 'chat' | 'comment' | 'audio', string> = {
   funny: 'engraçado',
   hype: 'hype',
   scary: 'susto/confusão',
   sad: 'fail/triste',
   chat: 'chat agitado',
+  comment: 'chat elogiando',
   audio: 'streamer gritando/energia',
 };
 
@@ -73,12 +75,14 @@ export interface VodBin {
   react: Record<ReactionKind, number>;
   /** Contagem dos emotes de reação nesta janela (para "emotes principais"). */
   tokens: Record<string, number>;
+  /** Mensagens com comentário de reação ("melhor parte", "muito engraçado", kkkk longo…). */
+  praise: number;
   /** Volume RMS do áudio (dBFS; -90 = silêncio/sem dado). */
   rms: number;
 }
 
 export function emptyBin(t: number): VodBin {
-  return { t, msgs: 0, react: { funny: 0, hype: 0, scary: 0, sad: 0 }, tokens: {}, rms: -90 };
+  return { t, msgs: 0, react: { funny: 0, hype: 0, scary: 0, sad: 0 }, tokens: {}, praise: 0, rms: -90 };
 }
 
 export function addMessage(bin: VodBin, text: string): void {
@@ -86,6 +90,15 @@ export function addMessage(bin: VodBin, text: string): void {
   const { kinds, tokens } = classifyMessage(text);
   for (const k of kinds) bin.react[k]++;
   for (const tk of tokens) bin.tokens[tk] = (bin.tokens[tk] ?? 0) + 1;
+  const praise = matchPraise(text);
+  if (praise) {
+    bin.praise++;
+    // Risada já aparece como emote ("kkkk"); só as frases ganham rótulo próprio
+    if (!LAUGH_LABELS.has(praise)) {
+      const key = `“${praise}”`;
+      bin.tokens[key] = (bin.tokens[key] ?? 0) + 1;
+    }
+  }
 }
 
 /** Mediana móvel (janela ±half), robusta a picos: é a "média da própria live" naquele trecho. */
@@ -105,6 +118,8 @@ export interface VodScore {
   score: number;
   chat: number;
   react: number;
+  /** Comentários de reação acima do normal da live. */
+  comment: number;
   audio: number;
 }
 
@@ -119,21 +134,37 @@ export function scoreBins(bins: VodBin[], opts: { hasAudio?: boolean } = {}): Vo
   const reacts = bins.map((b) => b.react.funny + b.react.hype + b.react.scary + b.react.sad);
   const baseMsgs = rollingMedian(msgs, half);
   const baseReact = rollingMedian(reacts, half);
+  const praises = bins.map((b) => b.praise ?? 0);
+  const basePraise = rollingMedian(praises, half);
   const voiced = bins.map((b) => (b.rms > -70 ? b.rms : NaN));
   const baseRms = rollingMedian(voiced.map((v) => (Number.isNaN(v) ? -70 : v)), half);
   const raw = bins.map((b, i) => {
     const chat = clamp01((msgs[i] / (baseMsgs[i] + 1) - 1) / 3); // 4x o normal = nota máxima
     const react = clamp01((reacts[i] / (baseReact[i] + 0.5) - 1) / 4);
+    // Precisa de pelo menos 2 comentários na janela: um elogio solto não é um momento
+    const comment = praises[i] < 2 ? 0 : clamp01((praises[i] / (basePraise[i] + 0.5) - 1) / 4);
     const lag = Math.round(10 / VOD_BIN_SECONDS);
     let loud = -90;
     for (let k = Math.max(0, i - lag); k <= i; k++) loud = Math.max(loud, bins[k].rms);
     const audio = opts.hasAudio === false ? 0 : clamp01((loud - baseRms[i]) / 8); // 8 dB acima do normal
     // Chat pesa mais (é o "termômetro" do público); áudio confirma
     const score = opts.hasAudio === false ? 0.65 * chat + 0.35 * react : 0.5 * chat + 0.25 * react + 0.25 * audio;
-    return { t: b.t, score, chat, react, audio };
+    return { t: b.t, score, chat, react, comment, audio };
   });
   // Suaviza 3 janelas para um pico isolado de 5 s não vencer um momento sustentado
   return raw.map((r, i) => ({ ...r, score: (raw[Math.max(0, i - 1)].score + 2 * r.score + raw[Math.min(raw.length - 1, i + 1)].score) / 4 }));
+}
+
+export type VodRankMode = 'peaks' | 'comments' | 'combined';
+
+/**
+ * Nota da janela em cada filtro. "peaks" = chat/emotes/áudio; "comments" = só o que o chat comenta;
+ * "combined" = os dois, mas um pico muito alto entra mesmo sem nenhum comentário de reação.
+ */
+export function modeScore(s: VodScore, mode: VodRankMode, commentSmooth: number): number {
+  if (mode === 'peaks') return s.score;
+  if (mode === 'comments') return commentSmooth;
+  return Math.max(0.6 * s.score + 0.4 * commentSmooth, s.score >= 0.55 ? s.score : 0);
 }
 
 export interface VodMoment {
@@ -144,12 +175,16 @@ export interface VodMoment {
   /** Instante do pico de reação do chat (s). */
   peak: number;
   score: number;
-  type: ReactionKind | 'chat' | 'audio';
+  type: ReactionKind | 'chat' | 'comment' | 'audio';
   typeLabel: string;
   /** Emotes de reação mais usados no momento. */
   emotes: string[];
   /** Mensagens por minuto no pico e o normal da live ali perto. */
   chatPerMin: number;
+  /** Comentários de reação no momento. */
+  comments: number;
+  /** Filtros em que o momento aparece e a posição nele. */
+  ranks: Partial<Record<VodRankMode, number>>;
 }
 
 /**
@@ -178,7 +213,8 @@ export function pickVodMoments(bins: VodBin[], scores: VodScore[], opts: { count
     const around = bins.slice(Math.max(0, p - 1), Math.min(bins.length, last + 2));
     const kinds = (['funny', 'hype', 'scary', 'sad'] as ReactionKind[]).map((kind) => ({ kind, n: around.reduce((a, b) => a + b.react[kind], 0) })).sort((a, b) => b.n - a.n);
     const s = scores[p];
-    const type: VodMoment['type'] = kinds[0].n >= 3 ? kinds[0].kind : s.audio > s.chat ? 'audio' : 'chat';
+    const praiseN = around.reduce((a, b) => a + (b.praise ?? 0), 0);
+    const type: VodMoment['type'] = s.comment > Math.max(s.chat, s.react) && praiseN >= 3 ? 'comment' : kinds[0].n >= 3 ? kinds[0].kind : s.audio > s.chat ? 'audio' : 'chat';
     const tokenTotals: Record<string, number> = {};
     for (const b of around) for (const [tk, n] of Object.entries(b.tokens)) tokenTotals[tk] = (tokenTotals[tk] ?? 0) + n;
     return {
@@ -194,6 +230,34 @@ export function pickVodMoments(bins: VodBin[], scores: VodScore[], opts: { count
         .slice(0, 3)
         .map(([tk]) => tk),
       chatPerMin: Math.round((bins[p].msgs * 60) / VOD_BIN_SECONDS),
+      comments: praiseN,
+      ranks: {},
     };
   });
+}
+
+/**
+ * Os N melhores momentos em cada filtro (picos, comentários, combinado), juntos numa lista só: um momento
+ * que aparece em mais de um filtro (picos a menos de 45 s) vira um item com a posição em cada um. A ordem e
+ * o "rank" seguem o combinado; o resto vem depois.
+ */
+export function pickVodMomentsByMode(bins: VodBin[], scores: VodScore[], opts: { count?: number; duration?: number } = {}): VodMoment[] {
+  const count = opts.count ?? 20;
+  // Comentários são esparsos: suaviza em ±2 janelas para não depender de um único bloco de 5 s
+  const commentSmooth = scores.map((_, i) => {
+    let a = 0;
+    let n = 0;
+    for (let k = Math.max(0, i - 2); k <= Math.min(scores.length - 1, i + 2); k++, n++) a += scores[k].comment;
+    return a / n;
+  });
+  const out: VodMoment[] = [];
+  for (const mode of ['combined', 'peaks', 'comments'] as VodRankMode[]) {
+    const ms = scores.map((s, i) => ({ ...s, score: modeScore(s, mode, commentSmooth[i]) }));
+    for (const m of pickVodMoments(bins, ms, { count, duration: opts.duration })) {
+      const same = out.find((o) => Math.abs(o.peak - m.peak) < 45);
+      if (same) same.ranks[mode] = m.rank;
+      else out.push({ ...m, ranks: { [mode]: m.rank } });
+    }
+  }
+  return out.map((m, i) => ({ ...m, rank: i + 1 }));
 }

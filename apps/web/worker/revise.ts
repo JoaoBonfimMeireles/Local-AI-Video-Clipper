@@ -19,7 +19,7 @@ import {
   type ClipEdit,
   type ClipLayout,
 } from '@clipper/editing-planner';
-import type { Job, LibraryIndex, ManualEdit, OutputFormat, Transcript } from '@clipper/shared';
+import type { FrameSide, Job, LibraryIndex, ManualEdit, ManualFrame, OutputFormat, Transcript } from '@clipper/shared';
 import {
   addJobLog,
   dataPaths,
@@ -207,7 +207,7 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
     bubble: layout?.bubble ?? null,
     contentPhases: layout?.contentPhases ?? null,
     // Enquadramento desenhado no editor manual (substitui o da IA)
-    manualFrames: (manual ? manual.frames : meta.edit?.frames)?.length ? (manual ? manual.frames : meta.edit.frames) : null,
+    manualFrames: withSceneFiles((manual ? manual.frames : meta.edit?.frames)?.length ? (manual ? manual.frames : meta.edit.frames) : null, ctx.input),
     zooms: resolved.zooms,
     overlays: resolved.overlays.map((o) => {
       const inf = memeInfo.get(o.file);
@@ -361,4 +361,11 @@ function zoomBox(b: { x0: number; y0: number; x1: number; y1: number }, zoom: nu
   const x = clamp(cx, hw);
   const y = clamp(cy, hh);
   return { ...b, x0: x - hw, x1: x + hw, y0: y - hh, y1: y + hh };
+}
+
+/** "Outra cena" ao lado vem do vídeo original: o editor não guarda o caminho dele, o render precisa. */
+function withSceneFiles(frames: ManualFrame[] | null, original: string): ManualFrame[] | null {
+  if (!frames) return null;
+  const fix = (sd?: FrameSide | null) => (sd?.kind === 'scene' ? { ...sd, file: original } : sd);
+  return frames.map((fr) => ({ ...fr, sideTop: fix(fr.sideTop), sideBottom: fix(fr.sideBottom) }));
 }

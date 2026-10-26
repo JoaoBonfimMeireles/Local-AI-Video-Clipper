@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { mapLimit } from '@clipper/shared';
 import { resolveBinary, runProcess } from '@clipper/shared/server';
 import { runFfmpeg, sec } from './ffmpeg';
 
@@ -11,6 +12,8 @@ export async function detectSceneChanges(input: string, opts: { threshold?: numb
     resolveBinary('ffmpeg'),
     [
       '-hide_banner', '-nostdin', '-progress', 'pipe:1', '-nostats',
+      // Decodifica na GPU quando houver (sem GPU, o FFmpeg cai sozinho para o processador)
+      '-hwaccel', 'auto',
       '-i', input, '-an', '-sn',
       '-vf', `fps=6,scale=256:-2,select='gt(scene,${t})',showinfo`,
       '-f', 'null', '-',
@@ -69,16 +72,19 @@ export interface ExtractedFrame {
 /** Extrai frames JPEG pequenos (seek rápido antes do -i). */
 export async function extractFrames(input: string, times: { time: number; reason: string }[], outDir: string, opts: { width?: number; signal?: AbortSignal; onProgress?: (p: number) => void } = {}): Promise<ExtractedFrame[]> {
   fs.mkdirSync(outDir, { recursive: true });
-  const out: ExtractedFrame[] = [];
-  for (let i = 0; i < times.length; i++) {
+  // Cada frame é um FFmpeg curto (busca + 1 imagem): 4 ao mesmo tempo, mesma ordem no resultado
+  let done = 0;
+  const res = await mapLimit(times, 4, async (t, i) => {
     const file = path.join(outDir, `frame_${String(i).padStart(3, '0')}.jpg`);
     try {
-      await runFfmpeg(['-ss', sec(times[i].time), '-i', input, '-frames:v', '1', '-vf', `scale=${opts.width ?? 512}:-2`, '-q:v', '4', file], { signal: opts.signal });
-      if (fs.existsSync(file)) out.push({ ...times[i], path: file });
+      await runFfmpeg(['-ss', sec(t.time), '-i', input, '-frames:v', '1', '-vf', `scale=${opts.width ?? 512}:-2`, '-q:v', '4', file], { signal: opts.signal });
+      return fs.existsSync(file) ? { ...t, path: file } : null;
     } catch (e) {
       if (opts.signal?.aborted) throw e;
+      return null;
+    } finally {
+      opts.onProgress?.(++done / times.length);
     }
-    opts.onProgress?.((i + 1) / times.length);
-  }
-  return out;
+  });
+  return res.filter((x): x is ExtractedFrame => !!x);
 }

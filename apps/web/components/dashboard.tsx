@@ -6,7 +6,11 @@ import { NewJobForm } from '@/components/new-job-form';
 import { api, usePolling } from '@/lib/client';
 
 export function Dashboard() {
-  const { data, refresh } = usePolling(() => api<{ jobs: Job[] }>('/api/jobs'), 1500);
+  // Rápido enquanto há tarefa rodando ou na fila; devagar quando está tudo parado
+  const { data, refresh } = usePolling(
+    () => api<{ jobs: Job[] }>('/api/jobs'),
+    (d) => (d?.jobs.some((j) => j.status === 'processing' || j.status === 'pending') ? 1500 : 6000),
+  );
   return (
     <div className="grid gap-6 lg:grid-cols-5">
       <div className="lg:col-span-3">

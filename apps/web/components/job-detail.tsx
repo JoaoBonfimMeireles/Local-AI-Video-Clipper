@@ -221,6 +221,24 @@ export function JobDetail({ id }: { id: string }) {
         </Card>
       )}
 
+      {job.settings.curiosity?.analyze && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Ideias de curiosidades</CardTitle>
+            <CardDescription>
+              {job.status === 'completed' ? 'Galeria pronta: escolha as ideias, ajuste os trechos e gere os vídeos.' : 'Transcrevendo o vídeo-fonte e montando as ideias pelos formatos escolhidos…'}
+            </CardDescription>
+          </CardHeader>
+          {job.status === 'completed' && (
+            <CardContent>
+              <Link href={`/curiosidades?fonte=${job.id}`} className={buttonVariants({})}>
+                Abrir a galeria de ideias
+              </Link>
+            </CardContent>
+          )}
+        </Card>
+      )}
+
       {job.result?.outputDir && job.status === 'completed' && <VideoInfo outputDir={job.result.outputDir} />}
       {job.settings.reference && <AssetRequests jobId={job.id} canRerender={job.status === 'completed' || job.status === 'failed'} />}
 

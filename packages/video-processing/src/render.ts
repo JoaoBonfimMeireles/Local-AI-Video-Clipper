@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { HwAccel, ManualFrame, OutputFormat } from '@clipper/shared';
+import type { FrameSide, HwAccel, ManualFrame, OutputFormat } from '@clipper/shared';
 import { insertSoundPauses, type SoundPause } from './pauses';
 import { runFfmpeg, sec } from './ffmpeg';
 
@@ -287,13 +287,13 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
   else srcLabels[0] = 'src';
   let next = 0;
 
-  const blurComposite = (input: string, out: string, tag: string, OW = W, OH = H) => {
+  const blurComposite = (input: string, out: string, tag: string, OW = W, OH = H, align = { x: 0.5, y: 0.5 }) => {
     const bw = even(OW / 4);
     const bh = even(OH / 4);
     f.push(`[${input}]split=2[bga${tag}][fga${tag}]`);
     f.push(`[bga${tag}]scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},boxblur=10:3,scale=${OW}:${OH},eq=brightness=-0.07:saturation=1.15[bg${tag}]`);
     f.push(`[fga${tag}]scale=${OW}:${OH}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[fg${tag}]`);
-    f.push(`[bg${tag}][fg${tag}]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2,setsar=1[${out}]`);
+    f.push(`[bg${tag}][fg${tag}]overlay=x=(main_w-overlay_w)*${num(align.x, 2)}:y=(main_h-overlay_h)*${num(align.y, 2)},setsar=1[${out}]`);
   };
   const windowsExpr = (list: { at: number; duration: number }[]) =>
     list.map((w) => `between(t,${num(Math.max(0, w.at))},${num(Math.min(duration, w.at + w.duration))})`).join('+');
@@ -341,21 +341,53 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
     if (total > 1) f.push(`[${baseIn}]split=${total}${ins.map((l) => `[${l}]`).join('')}`);
     else ins[0] = baseIn;
     let k = 0;
-    /** Área da fonte numa região OW x OH: cover = preenche (apara sobras); blur = inteira com fundo desfocado. */
-    const place = (input: string, box: ManualFrame['box'], fit: ManualFrame['fit'], OW: number, OH: number, out: string, tag: string) => {
+    const A = (a?: { x: number; y: number }) => ({ x: Math.min(1, Math.max(0, a?.x ?? 0.5)), y: Math.min(1, Math.max(0, a?.y ?? 0.5)) });
+    /** Encaixa [input] (já recortado) em OW x OH: cover = preenche (apara sobras, do lado escolhido); blur = inteira com fundo desfocado. */
+    const fitTo = (input: string, fit: ManualFrame['fit'], align: { x: number; y: number }, OW: number, OH: number, out: string, tag: string) => {
+      if (fit === 'blur') blurComposite(input, out, `m${tag}`, OW, OH, align);
+      else f.push(`[${input}]scale=${OW}:${OH}:force_original_aspect_ratio=increase,crop=${OW}:${OH}:(iw-${OW})*${num(align.x, 2)}:(ih-${OH})*${num(align.y, 2)},setsar=1[${out}]`);
+    };
+    /** Área da fonte numa região OW x OH. */
+    const place = (input: string, box: ManualFrame['box'], fit: ManualFrame['fit'], align: { x: number; y: number }, OW: number, OH: number, out: string, tag: string) => {
       const px = pxBox(box) ?? whole;
       f.push(`[${input}]crop=${px.w}:${px.h}:${px.x}:${px.y},setsar=1[mc_${tag}]`);
-      if (fit === 'blur') blurComposite(`mc_${tag}`, out, `m${tag}`, OW, OH);
-      else f.push(`[mc_${tag}]scale=${OW}:${OH}:force_original_aspect_ratio=increase,crop=${OW}:${OH},setsar=1[${out}]`);
+      fitTo(`mc_${tag}`, fit, align, OW, OH, out, tag);
+    };
+    /** Conteúdo ao lado (imagem, vídeo ou outra cena): entrada própria, alinhada ao tempo do enquadramento. */
+    const sideInput = (sd: FrameSide, fr: ManualFrame, tag: string): string | null => {
+      if (!sd.file) return null;
+      const len = Math.max(0.2, Math.min(duration, fr.end) - Math.max(0, fr.at));
+      const n = idx++;
+      if (sd.kind === 'image') {
+        inputs.push('-loop', '1', '-framerate', String(fps), '-t', sec(duration + 0.1), '-i', sd.file);
+        f.push(`[${n}:v]fps=${fps},setsar=1[si_${tag}]`);
+      } else {
+        inputs.push('-ss', sec(Math.max(0, sd.start ?? 0)), '-t', sec(len + 0.2), '-i', sd.file);
+        const b = sd.box;
+        const crop = b ? `,crop=iw*${num(b.x1 - b.x0)}:ih*${num(b.y1 - b.y0)}:iw*${num(b.x0)}:ih*${num(b.y0)}` : '';
+        // Começa no início do enquadramento (antes disso repete o 1º quadro; o trecho só aparece na sua janela)
+        f.push(`[${n}:v]setpts=PTS-STARTPTS,fps=${fps}${crop},tpad=start_mode=clone:start_duration=${num(Math.max(0, fr.at))}:stop_mode=clone:stop_duration=${num(duration)},setsar=1[si_${tag}]`);
+      }
+      return `si_${tag}`;
+    };
+    /** Um bloco (tela toda ou metade de cima/baixo): o conteúdo principal e, se houver, o outro conteúdo ao lado. */
+    const block = (input: string, box: ManualFrame['box'], fit: ManualFrame['fit'], align: { x: number; y: number }, sd: FrameSide | null | undefined, fr: ManualFrame, OW: number, OH: number, out: string, tag: string) => {
+      const si = sd ? sideInput(sd, fr, tag) : null;
+      if (!sd || !si) return place(input, box, fit, align, OW, OH, out, tag);
+      const sw = even(OW * Math.min(0.8, Math.max(0.2, sd.width)));
+      const mw = OW - sw;
+      place(input, box, fit, align, mw, OH, `bm_${tag}`, `${tag}m`);
+      fitTo(si, sd.fit, A(sd.align), sw, OH, `bs_${tag}`, `${tag}s`);
+      f.push(sd.side === 'left' ? `[bs_${tag}][bm_${tag}]hstack=inputs=2,setsar=1[${out}]` : `[bm_${tag}][bs_${tag}]hstack=inputs=2,setsar=1[${out}]`);
     };
     frames.forEach((fr, i) => {
       if (twoBoxes(fr)) {
         const topH = even(H * Math.min(0.8, Math.max(0.2, fr.topRatio ?? 0.4)));
-        place(ins[k++], fr.box, 'cover', W, topH, `mt${i}`, `t${i}`);
-        place(ins[k++], fr.box2!, fr.fit, W, H - topH, `mb${i}`, `b${i}`);
+        block(ins[k++], fr.box, fr.fitTop ?? 'cover', A(fr.alignTop), fr.sideTop, fr, W, topH, `mt${i}`, `t${i}`);
+        block(ins[k++], fr.box2!, fr.fit, A(fr.alignBottom), fr.sideBottom, fr, W, H - topH, `mb${i}`, `b${i}`);
         f.push(`[mt${i}][mb${i}]vstack=inputs=2,setsar=1[mf${i}]`);
       } else {
-        place(ins[k++], fr.box, fr.fit, W, H, `mf${i}`, `s${i}`);
+        block(ins[k++], fr.box, fr.fit, A(fr.alignTop), fr.sideTop, fr, W, H, `mf${i}`, `s${i}`);
       }
     });
     let cur = 'mf0';

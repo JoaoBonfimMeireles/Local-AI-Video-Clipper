@@ -1,7 +1,8 @@
 'use client';
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { Download, FileJson, FileText, Loader2, Star, Trash2 } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Download, FileJson, FileText, Loader2, Pencil, Star, Trash2 } from 'lucide-react';
 import type { Favorite } from '@clipper/shared';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -124,6 +125,7 @@ export function FavoritesList() {
 
 function FavoriteCard({ fav, revision, onRemove, onRevise }: { fav: Favorite; revision?: RevisionStatus; onRemove: () => void; onRevise: (rev: RevisionStatus) => void }) {
   const revising = revisionActive(revision);
+  const editAction = useEditAction(fav.metadataPath);
   const thumb = fav.videoPath.replace(/\.mp4$/, '.jpg');
   return (
     <Card className={cn('overflow-hidden', revising && 'ring-2 ring-primary/50')}>
@@ -155,10 +157,10 @@ function FavoriteCard({ fav, revision, onRemove, onRevise }: { fav: Favorite; re
           </Link>
         </p>
         {(fav.description || fav.hashtags.length > 0) && <PostText clip={fav} />}
-        <ClipAssets key={fav.metadataPath} metadataPath={fav.metadataPath} />
+        {editAction === null && <ClipAssets key={fav.metadataPath} metadataPath={fav.metadataPath} />}
         <LanguageDownloads key={`l${fav.metadataPath}`} metadataPath={fav.metadataPath} />
         {revision && <RevisionBanner rev={revision} />}
-        {!revising && <ReviseBox endpoint={`/api/favorites/${fav.id}/revise`} onQueued={onRevise} />}
+        {editAction === undefined ? null : editAction ? <EditButton action={editAction} /> : !revising && <ReviseBox endpoint={`/api/favorites/${fav.id}/revise`} onQueued={onRevise} />}
         <div className="flex flex-wrap gap-1.5 pt-1">
           <a className={buttonVariants({ size: 'sm' })} href={fileUrl(fav.videoPath, true)}>
             <Download /> MP4
@@ -174,5 +176,42 @@ function FavoriteCard({ fav, revision, onRemove, onRevise }: { fav: Favorite; re
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+type EditAction = { type: 'meme'; url: string } | { type: 'clean'; jobId: string };
+
+/** Vídeos editados (compilado / vídeo limpo) guardam no clip.json como reabrir a edição. undefined = carregando. */
+function useEditAction(metadataPath: string): EditAction | null | undefined {
+  const [action, setAction] = useState<EditAction | null | undefined>(undefined);
+  useEffect(() => {
+    fetch(fileUrl(metadataPath))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((m) => setAction(m?.editAction ?? null))
+      .catch(() => setAction(null));
+  }, [metadataPath]);
+  return action;
+}
+
+function EditButton({ action }: { action: EditAction }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  async function go() {
+    if (action.type === 'meme') return router.push(action.url);
+    // Vídeo limpo: copia para data/input e abre no Painel
+    setBusy(true);
+    try {
+      const r = await api<{ name: string }>('/api/clean/send', { method: 'POST', body: JSON.stringify({ jobId: action.jobId }) });
+      router.push(`/?file=${encodeURIComponent(r.name)}`);
+    } catch (e) {
+      alert((e as Error).message);
+      setBusy(false);
+    }
+  }
+  return (
+    <Button size="sm" variant="secondary" className="w-full" onClick={go} disabled={busy}>
+      {busy ? <Loader2 className="animate-spin" /> : <Pencil />}
+      {action.type === 'meme' ? 'Editar no Editor de vídeo' : 'Levar para o editor'}
+    </Button>
   );
 }

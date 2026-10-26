@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { FileVideo, Loader2, Play, RefreshCw, Save, Trash2, UploadCloud } from 'lucide-react';
 import { creditLine, DEFAULT_JOB_SETTINGS, formatBytes, LANGUAGES, TWITCH_CATEGORIES, type Intensity, type JobSettings, type OutputFormat, type Preset } from '@clipper/shared';
 import { Button } from '@/components/ui/button';
@@ -59,7 +60,8 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
     setPresets((await api<{ presets: Preset[] }>('/api/presets')).presets);
   }
   useEffect(() => {
-    loadFiles().catch(() => undefined);
+    // ?file=<nome> (vindo de "Limpar vídeo"): já deixa esse vídeo selecionado
+    loadFiles(new URLSearchParams(window.location.search).get('file') || undefined).catch(() => undefined);
     loadPresets().catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -291,6 +293,10 @@ export function NewJobForm({ onCreated }: { onCreated: () => void }) {
               <div className="text-sm font-semibold">A partir de um corte viral</div>
               <div className="mt-0.5 text-xs text-muted-foreground">Você manda o corte de outra pessoa e o original: a IA recria do original, com montagem própria</div>
             </button>
+            <Link href="/curiosidades" className="rounded-lg border border-fuchsia-500/40 bg-gradient-to-br from-fuchsia-500/10 to-indigo-500/10 p-3 text-left transition-colors hover:from-fuchsia-500/20 hover:to-indigo-500/20">
+              <div className="text-sm font-semibold">✨ Curiosidades</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">Um vídeo-fonte vira vários vídeos curtos: Top N, Você sabia, Mito vs verdade, com narrador opcional</div>
+            </Link>
           </div>
           {settings.reference && (
             <div className="space-y-3 rounded-lg border bg-muted/30 p-3">

@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { Clapperboard, LayoutDashboard, Library, Settings, Star } from 'lucide-react';
+import { Clapperboard, Eraser, Laugh, LayoutDashboard, Library, Settings, Sparkles, Star } from 'lucide-react';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -25,6 +25,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </Link>
             <nav className="flex items-center gap-1 text-sm">
               <NavLink href="/" icon={<LayoutDashboard className="size-4" />} label="Painel" />
+              <NavLink href="/limpar" icon={<Eraser className="size-4" />} label="Limpar vídeo" />
+              <NavLink href="/curiosidades" icon={<Sparkles className="size-4" />} label="Curiosidades" />
+              <NavLink href="/memes" icon={<Laugh className="size-4" />} label="Editor de vídeo" />
               <NavLink href="/favorites" icon={<Star className="size-4" />} label="Favoritos" />
               <NavLink href="/library" icon={<Library className="size-4" />} label="Biblioteca" />
               <NavLink href="/settings" icon={<Settings className="size-4" />} label="Configurações" />
@@ -40,7 +43,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
 function NavLink({ href, icon, label }: { href: string; icon: React.ReactNode; label: string }) {
   return (
-    <Link href={href} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+    <Link href={href} className="flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
       {icon}
       {label}
     </Link>

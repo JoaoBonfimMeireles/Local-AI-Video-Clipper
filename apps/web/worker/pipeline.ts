@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -31,10 +30,11 @@ import {
   type ClipSegment,
 } from '@clipper/clip-selection';
 import { buildCatalog, detectFacecam, ILLUSTRATION_CATEGORY, findAssetsByKeywords, heuristicEdit, shortlistLibrary, type ClipLayout, heuristicShots, normalizeEdit, refineShots, resolveEdit, type AssetMeta, type ClipEdit, type ResolvedEdit, type VideoKnowledge } from '@clipper/editing-planner';
-import { creditLine, flattenWords, formatTimestamp, slugify, TWITCH_CATEGORIES, type AppSettings, type Job, type JobResult, type PipelineStep, type ProbeInfo, type Transcript, type TranscriptWord } from '@clipper/shared';
+import { creditLine, flattenWords, formatTimestamp, mapLimit, slugify, TWITCH_CATEGORIES, type AppSettings, type Job, type JobResult, type PipelineStep, type ProbeInfo, type Transcript, type TranscriptWord } from '@clipper/shared';
 import {
   addJobLog,
   dataPaths,
+  videoCacheBase,
   getAppSettings,
   getJob,
   replaceClips,
@@ -76,6 +76,7 @@ import { combineGuidelines, getStyleGuide } from './references';
 import { translateCaptions, writeCaptionFiles, type ClipCaptions } from './captions';
 import { getIllustration } from './illustrations';
 import { manualClipLayout } from './manual-layout';
+import { addNarrator } from './narrator';
 import { applyUploadedAssets, prepareReference, writeRequests, type PreparedReference } from './recreate';
 
 // Faixa de progresso global de cada etapa
@@ -308,7 +309,8 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
   const cacheBase = videoCacheBase(job.inputPath, app.whisperModel, s.sourceLanguage);
   let knowledge: VideoKnowledge | null = null;
   // Corte viral de referência: uma chamada só (corte + trecho do original), sem a análise completa do vídeo
-  if (llm && !refPrep) {
+  // Curiosidades: as ideias já vêm aprovadas do painel, sem análise do vídeo inteiro
+  if (llm && !refPrep && !s.curiosity?.ideas?.length) {
     // A análise de live (Twitch) tem outro olhar e outras categorias: cache separado por modo
     // v2: análise de live mais densa (≈1 momento/30s) e com picos de volume — invalida análises antigas mais rasas
     // Análise feita por modelo gratuito/limitado fica separada: com IA paga o vídeo é reanalisado com mais qualidade
@@ -422,6 +424,15 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
 
   const selected = await cached<SelectedClip[]>('selected.json', async () => {
     let candidates: ClipCandidate[] = [];
+    // Curiosidades: cada ideia aprovada (trechos ajustados à mão no painel) vira um corte, na ordem escolhida
+    if (s.curiosity?.ideas?.length) {
+      return s.curiosity.ideas.map((idea, index) => {
+        const segments = idea.segments.map((sg) => ({ start: Math.max(0, sg.start), end: Math.min(info.duration, sg.end), label: sg.label ?? null })).filter((sg) => sg.end > sg.start + 0.5);
+        // Top N usa os cartões numerados do Top 5 (um por trecho) quando não há narrador
+        const category = idea.template === 'top_n' && segments.length >= 2 ? 'top5' : idea.template;
+        return { title: idea.title, hook: idea.hook, reason: idea.reason, score: idea.score, category, segments, start: Math.min(...segments.map((x) => x.start)), end: Math.max(...segments.map((x) => x.end)), index };
+      });
+    }
     // Corte viral: a seleção fica guardada junto da saída — "renderizar de novo com o material" mantém os mesmos cortes
     const keptSelection = path.join(outputDir, 'selecao.json');
     if (refPrep && fs.existsSync(keptSelection)) {
@@ -508,6 +519,23 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
   // Biblioteca pode ter milhares de arquivos numa pasta só: pré-seleciona pelo NOME os que combinam com
   // o que acontece nos cortes, e só esses são analisados (duração, áudio, fundo verde) e mostrados à IA.
   const clipWords = new Map<number, TranscriptWord[]>(selected.map((c) => [c.index, wordsForSegments(transcript, c.segments)]));
+  // Legendas em 4 idiomas (pt, en, es, zh) de todos os cortes: uma chamada barata por idioma, em cache.
+  // Só dependem das falas: começam já, em paralelo com o plano de edição, e são aguardadas no render
+  const captionsP = cached<Record<number, ClipCaptions>>('captions_4lang.json', () =>
+    translateCaptions({
+      llm: translateLlm,
+      clips: selected.map((c) => ({
+        index: c.index,
+        cues: captionCues(clipWords.get(c.index)!),
+        labels: c.category === 'top5' ? rankCardsFor(c.segments).map((r) => r.label) : [],
+      })),
+      sourceLang: transcript.language,
+      guidelines: app.editingPrompt,
+      signal,
+      log: (l, m) => log(l, m),
+    }),
+  );
+  captionsP.catch(() => undefined); // erro tratado no await do render
   const contextTexts = selected.flatMap((c) => {
     const moments = (knowledge?.moments ?? []).filter((m) => c.segments.some((sg) => m.end > sg.start && m.start < sg.end));
     return [c.title, c.reason, c.category ?? '', clipWords.get(c.index)!.map((w) => w.word).join(' '), ...moments.map((m) => `${m.type} ${m.topic ?? ''} ${m.description} ${m.visual ?? ''}`)];
@@ -547,7 +575,8 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
   const plan = await cached<ResolvedEdit[]>('plan.json', async () => {
     // Frames a cada 1s + rostos (YuNet local) + cortes de câmera do original, na linha do tempo de cada corte
     const visual = new Map<number, { frames: { time: number; path: string; faces: DetectedFace[] }[]; cuts: number[] }>();
-    for (const c of selected) {
+    // Dois cortes ao mesmo tempo (FFmpeg + detector de rostos), cada um na sua pasta
+    await mapLimit(selected, 2, async (c) => {
       const dense = await extractClipFramesFps(job.inputPath, c.segments, usableDir(path.join(tempDir, `clipframes_${c.index}`)), { fps: 1, signal });
       const faces = await detectFaces(dense.map((f) => f.path), signal);
       const cuts: number[] = [];
@@ -558,7 +587,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         offset += sg.end - sg.start;
       });
       visual.set(c.index, { frames: dense.map((f, i) => ({ ...f, faces: faces[i] ?? [] })), cuts: cuts.map((t) => Number(t.toFixed(2))) });
-    }
+    });
     // Lives: layout decidido POR CORTE (a facecam pode aparecer só em parte da live).
     // facecam visível → facecam + jogo; gameplay sem rosto grande → jogo inteiro, sem zooms; rosto grande → IRL (por pessoa)
     const layouts = new Map<number, ClipLayout>();
@@ -852,24 +881,13 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
   let failed = 0;
   const clipsMeta: unknown[] = [];
 
-  // Legendas em 4 idiomas (pt, en, es, zh) de todos os cortes: uma chamada barata por idioma, em cache
-  const captions = await cached<Record<number, ClipCaptions>>('captions_4lang.json', () =>
-    translateCaptions({
-      llm: translateLlm,
-      clips: selected.map((c) => ({
-        index: c.index,
-        cues: captionCues(clipWords.get(c.index)!),
-        labels: c.category === 'top5' ? rankCardsFor(c.segments).map((r) => r.label) : [],
-      })),
-      sourceLang: transcript.language,
-      guidelines: app.editingPrompt,
-      signal,
-      log: (l, m) => log(l, m),
-    }),
-  );
+  const captions = await captionsP;
   if (!translateLlm) log('warn', 'Sem provedor de IA: legendas só no idioma original e sem a versão em mandarim');
 
-  for (const c of selected) {
+  // Com NVENC, dois cortes são renderizados ao mesmo tempo (a placa tem várias sessões de codificação); x264 já usa
+  // todos os núcleos, então segue um por vez
+  const renderSlots = app.hwAccel === 'nvenc' ? 2 : 1;
+  await mapLimit(selected, renderSlots, async (c) => {
     signal.throwIfAborted();
     const n = String(c.index + 1).padStart(3, '0');
     const base = path.join(clipsDir, `clip_${n}`);
@@ -877,6 +895,8 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
     const duration = clipDuration(c);
     const tick = (p: number) => progress('render', (c.index + p) / selected.length);
     updateClip(job.id, c.index, { status: 'rendering', error: null });
+    // Curiosidades com narrador: a legenda queimada é a da narração (posta junto com o personagem, depois do render)
+    const narratedIdea = s.curiosity?.narrator ? (s.curiosity.ideas?.[c.index] ?? null) : null;
     try {
       const emphasis = new Set(edit.emphasisWords.map((w) => w.toLowerCase()));
       const words = clipWords.get(c.index)!.map((w) => ({ ...w, emphasis: emphasis.has(w.word.replace(/[^\p{L}\p{N}]/gu, '').toLowerCase()) }));
@@ -886,7 +906,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         if (!assetAudio.has(o.file)) assetAudio.set(o.file, (await probeAsset(o.file)).hasAudio);
       }
       // No layout facecam + jogo a legenda fica na emenda entre as duas partes
-      const ass = s.burnSubtitles
+      const ass = s.burnSubtitles && !narratedIdea
         ? buildAss(translatedWords ?? words, {
             width: canvas.width,
             height: canvas.height,
@@ -947,12 +967,17 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         onProgress: (p) => tick(input === job.inputPath ? p * 0.6 : 0.3 + p * 0.35),
       };
       await renderClip(renderArgs);
+      let narratedDuration: number | null = null;
+      if (narratedIdea) {
+        log('info', `Corte ${c.index + 1}: narrador (voz + personagem)`);
+        narratedDuration = await addNarrator({ video: `${base}.mp4`, idea: narratedIdea, width: canvas.width, height: canvas.height, app, workDir: path.join(workDir, 'narrador'), signal, log: (l, m) => log(l, m) });
+      }
       await extractThumbnail(`${base}.mp4`, `${base}.jpg`, Math.min(1.5, duration / 2)).catch(() => undefined);
 
       // Mesma edição, legenda em mandarim (chinês simplificado): reaproveita a fonte já preparada do corte
       let videoZh: string | null = null;
       const zh = captions[c.index]?.cues.zh;
-      if (s.burnSubtitles && zh?.length) {
+      if (s.burnSubtitles && zh?.length && !narratedIdea) {
         try {
           const cards = c.category === 'top5' ? rankCardsFor(c.segments) : undefined;
           const zhLabels = captions[c.index]?.labels.zh ?? [];
@@ -1006,7 +1031,9 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         assetRequests: c.assetRequests?.length ? c.assetRequests : undefined,
         hashtags: edit.hashtags,
         source: { file: path.basename(job.inputPath), start: c.start, end: c.end, segments: c.segments },
-        duration: Number((duration + pausedTotal).toFixed(3)),
+        duration: Number((narratedDuration ?? duration + pausedTotal).toFixed(3)),
+        // Curiosidades: formato, roteiro narrado e CTA da ideia
+        curiosity: s.curiosity?.ideas?.[c.index] ? { ...s.curiosity.ideas[c.index], narrator: !!narratedIdea } : undefined,
         format: s.format,
         resolution: `${canvas.width}x${canvas.height}`,
         intensity: s.intensity,
@@ -1061,7 +1088,8 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
       log('error', `✘ clip_${n} falhou: ${msg}`);
     }
     tick(1);
-  }
+  });
+  clipsMeta.sort((a, b) => ((a as { index: number }).index ?? 0) - ((b as { index: number }).index ?? 0));
 
   // ---------------- 8. Exportação ----------------
   begin('export', 'Organizando arquivos de saída');
@@ -1123,11 +1151,8 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
  * Base dos arquivos de cache de um vídeo (transcrição, conhecimento da IA, texto em português).
  * Identifica o arquivo por nome, tamanho e data de modificação, mais modelo/idioma do Whisper.
  */
-export function videoCacheBase(input: string, model: string, language: string): string {
-  const st = fs.statSync(input);
-  const key = createHash('sha1').update([path.basename(input), st.size, Math.floor(st.mtimeMs), model, language].join('|')).digest('hex').slice(0, 20);
-  return path.join(dataPaths.root, 'cache', 'transcripts', key);
-}
+// A chave dos caches por vídeo mora em @clipper/shared (a exclusão de jobs usa a mesma regra)
+export { videoCacheBase };
 
 export function transcriptCachePath(input: string, model: string, language: string): string {
   return `${videoCacheBase(input, model, language)}.json`;

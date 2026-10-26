@@ -2,6 +2,7 @@
 export * from './paths';
 export * from './env';
 export * from './db';
+export * from './cleanup';
 export * from './library';
 export * from './process';
 export * from './binaries';

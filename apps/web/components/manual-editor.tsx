@@ -80,12 +80,24 @@ export function ManualEditor({ clip, onClose, onQueued }: { clip: Clip; onClose:
 
   const segments = useMemo(() => draft?.segments ?? [], [draft?.segments]);
   // Vídeo da prévia: o original ou uma cópia leve (VOD em MPEG-TS não toca no navegador)
-  const [source, setSource] = useState<{ path: string; offset: number } | null>(null);
+  const [source, setSource] = useState<{ path: string; offset: number; original?: string } | null>(null);
   const [sourceError, setSourceError] = useState<string | null>(null);
   useEffect(() => {
-    api<{ path: string; offset: number }>(`/api/jobs/${clip.jobId}/clips/${clip.index}/preview-source`).then(setSource).catch((e) => setSourceError((e as Error).message));
+    api<{ path: string; offset: number; original?: string }>(`/api/jobs/${clip.jobId}/clips/${clip.index}/preview-source`).then(setSource).catch((e) => setSourceError((e as Error).message));
   }, [clip.jobId, clip.index]);
   const player = useClipPlayer(segments, source?.offset ?? 0, !!source);
+  // "Outra cena" ao lado precisa do original inteiro: o próprio arquivo (se toca) ou uma cópia leve dele (só quando usado)
+  const hasScene = !!draft?.frames?.some((f) => f.sideTop?.kind === 'scene' || f.sideBottom?.kind === 'scene');
+  const [sceneUrl, setSceneUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!hasScene || sceneUrl || !source) return;
+    if (source.offset === 0 && source.path === source.original) return setSceneUrl(fileUrl(source.path));
+    if (!source.original) return;
+    const name = source.original.split(/[\/]/).pop()!;
+    api<{ path: string }>(`/api/inputs/preview?name=${encodeURIComponent(name)}`)
+      .then((r) => setSceneUrl(fileUrl(r.path)))
+      .catch(() => undefined);
+  }, [hasScene, sceneUrl, source]);
   const total = player.total;
   const now = () => r1(Math.min(Math.max(0, player.now()), Math.max(0, total - 0.3)));
   const seek = (t: number) => player.seek(t);
@@ -193,7 +205,7 @@ export function ManualEditor({ clip, onClose, onQueued }: { clip: Clip; onClose:
               {sourceError ? (
                 <p className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">{sourceError}</p>
               ) : draft.frames?.length ? (
-                <LivePreview player={player} frames={draft.frames} zooms={draft.zooms} overlays={previewOverlays} sfx={previewSfx} W={W} H={H} />
+                <LivePreview player={player} frames={draft.frames} zooms={draft.zooms} overlays={previewOverlays} sfx={previewSfx} W={W} H={H} sceneUrl={sceneUrl} />
               ) : (
                 <div className="grid aspect-[9/16] w-full max-w-[300px] place-items-center rounded-lg bg-black p-4 text-center text-xs text-muted-foreground">
                   <span>
@@ -219,6 +231,7 @@ export function ManualEditor({ clip, onClose, onQueued }: { clip: Clip; onClose:
                     frames={draft.frames}
                     W={W}
                     H={H}
+                    toOriginal={(t) => player.toSource(t) + (source?.offset ?? 0)}
                     onChange={(frames) => {
                       setFramesTouched(true);
                       update((d) => ({ ...d, frames }));

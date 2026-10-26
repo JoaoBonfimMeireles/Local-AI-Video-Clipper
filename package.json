@@ -9,6 +9,7 @@
     "dev:web": "node scripts/run-next.js dev apps/web --webpack -p 3000",
     "worker": "tsx apps/web/worker/index.ts",
     "build": "node scripts/run-next.js build apps/web --webpack",
+    "app": "node scripts/app.js",
     "start": "concurrently -k -n web,worker -c cyan,magenta \"node scripts/run-next.js start apps/web -p 3000\" \"tsx apps/web/worker/index.ts\"",
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p apps/web",
     "check-env": "node scripts/check-env.js",

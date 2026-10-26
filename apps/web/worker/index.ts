@@ -14,6 +14,9 @@ import {
   requeueStaleJobs,
   runProcess,
 } from '@clipper/shared/server';
+import { runCleanJob } from './clean';
+import { runCuriosityAnalysis } from './curiosity';
+import { runMemeJob } from './meme';
 import { runPipeline } from './pipeline';
 import { runReferenceJob } from './references';
 import { runRevision } from './revise';
@@ -93,9 +96,20 @@ async function main() {
         addJobLog(job.id, 'info', `Análise do VOD ${vodId} concluída em ${((Date.now() - t0) / 1000).toFixed(0)}s`);
         continue;
       }
+      // Curiosidades: só transcreve e gera a galeria de ideias (o render vem depois, com as ideias aprovadas)
+      if (job.settings.curiosity?.analyze) {
+        const n = await runCuriosityAnalysis(job, ac.signal);
+        finishJob(job.id, 'completed');
+        addJobLog(job.id, 'info', `Ideias de curiosidade geradas (${n}) em ${((Date.now() - t0) / 1000).toFixed(0)}s`);
+        continue;
+      }
       // Cortes de VOD: baixa só os trechos aprovados antes do pipeline normal
       if (job.settings.vodSource) await prepareVodSource(job, ac.signal);
-      const { rendered, failed } = job.settings.analyzeReferences
+      const { rendered, failed } = job.settings.clean
+        ? await runCleanJob(job, ac.signal)
+        : job.settings.meme
+        ? await runMemeJob(job, ac.signal)
+        : job.settings.analyzeReferences
         ? await runReferenceJob(job, ac.signal)
         : job.settings.revision
           ? await runRevision(job, ac.signal)
