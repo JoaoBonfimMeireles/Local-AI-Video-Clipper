@@ -2,15 +2,18 @@
 // Roda em processo separado do Next.js para nunca travar a interface HTTP.
 import fs from 'node:fs';
 import path from 'node:path';
+import { setLLMUsageListener } from '@clipper/ai-providers';
 import {
   addJobLog,
   claimNextJob,
   dataPaths,
   finishJob,
   getDb,
+  getJob,
   getJobStatus,
   getRepoRoot,
   loadRootEnv,
+  recordAiUsage,
   requeueStaleJobs,
   runProcess,
 } from '@clipper/shared/server';
@@ -88,6 +91,8 @@ async function main() {
       if (getJobStatus(job.id) === 'cancelled') ac.abort(new Error('cancelado pelo usuário'));
     }, 1500);
     const t0 = Date.now();
+    // Toda chamada de IA deste job vai para o banco, na etapa em que o job está naquele momento
+    setLLMUsageListener((u) => recordAiUsage({ jobId: job.id, step: getJob(job.id)?.step ?? '', ...u }));
     try {
       // Análise de VOD da Twitch: não renderiza cortes, só acha os momentos para revisão
       if (job.settings.vodAnalysis) {
@@ -134,6 +139,7 @@ async function main() {
         finishJob(job.id, 'failed', msg.slice(0, 2000));
       }
     } finally {
+      setLLMUsageListener(null);
       clearInterval(watcher);
       current = null;
     }

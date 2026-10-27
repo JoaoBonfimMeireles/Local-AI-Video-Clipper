@@ -5,7 +5,7 @@ import path from 'node:path';
 import { detectSubtitleRegion } from '@clipper/ai-providers';
 import type { Job } from '@clipper/shared';
 import { addJobLog, dataPaths, setJobResult, updateJobProgress } from '@clipper/shared/server';
-import { cleanVideo, extractFrames, probe } from '@clipper/video-processing';
+import { cleanVideo, extractFrames, probe, removeDirTolerant, upscaleVideo } from '@clipper/video-processing';
 
 /** Faixa de progresso de cada etapa. */
 const RANGES: Record<string, [number, number]> = {
@@ -16,6 +16,9 @@ const RANGES: Record<string, [number, number]> = {
   final: [0.8, 0.92],
   stems: [0.92, 1],
 };
+/** Com "Melhorar qualidade", a limpeza ocupa só o começo da barra e o upscale (quadro a quadro) o resto. */
+const CLEAN_SHARE = 0.25;
+const UPSCALE: Record<'extract' | 'upscale' | 'encode', [number, number]> = { extract: [0.25, 0.3], upscale: [0.3, 0.94], encode: [0.94, 1] };
 
 export async function runCleanJob(job: Job, signal: AbortSignal): Promise<{ rendered: number; failed: number }> {
   const spec = { ...job.settings.clean! };
@@ -46,6 +49,8 @@ export async function runCleanJob(job: Job, signal: AbortSignal): Promise<{ rend
   fs.mkdirSync(outDir, { recursive: true });
   const base = path.parse(spec.file).name.replace(/[^\p{L}\p{N}_\- ]/gu, '_').slice(0, 80);
   const output = path.join(outDir, `${base}_limpo_${job.id.slice(0, 6)}.mp4`);
+  const upscaleTo = spec.upscaleTo ?? 0;
+  const share = upscaleTo ? CLEAN_SHARE : 1;
   const res = await cleanVideo({
     input: job.inputPath,
     spec,
@@ -55,16 +60,36 @@ export async function runCleanJob(job: Job, signal: AbortSignal): Promise<{ rend
     log: (m) => log('info', m),
     onStep: (step, p) => {
       const [a, b] = RANGES[step] ?? [0, 1];
-      updateJobProgress(job.id, step, a + (b - a) * p);
+      updateJobProgress(job.id, step, (a + (b - a) * p) * share);
     },
   });
-  setJobResult(job.id, { outputDir: outDir, cleanOutput: output, cleanStems: res.stems });
   log('info', `Vídeo limpo (${res.duration.toFixed(1)}s, ${res.removedSeconds.toFixed(1)}s removidos): ${output}`);
-  updateJobProgress(job.id, 'stems', 1);
-  try {
-    fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 3 });
-  } catch {
-    /* arquivo ainda preso pelo Windows: cleanOrphanTemp apaga na próxima inicialização */
+
+  if (upscaleTo) {
+    const upscaled = path.join(tempDir, 'upscaled.mp4');
+    const started = Date.now();
+    const r = await upscaleVideo({
+      input: output,
+      output: upscaled,
+      target: upscaleTo,
+      model: spec.upscaleModel ?? 'realistic',
+      workDir: tempDir,
+      signal,
+      log: (m) => log('info', m),
+      // O passo leva "quadros prontos/total" para a tela mostrar o andamento por quadro
+      onProgress: (phase, p, frames) => {
+        const [a, b] = UPSCALE[phase];
+        updateJobProgress(job.id, phase === 'upscale' && frames ? `upscale ${frames.done}/${frames.total}` : `upscale_${phase}`, a + (b - a) * p);
+      },
+    });
+    if (r) {
+      fs.rmSync(output, { force: true, maxRetries: 5, retryDelay: 300 });
+      fs.renameSync(upscaled, output);
+      log('info', `Qualidade melhorada para ${r.width}x${r.height} em ${Math.round((Date.now() - started) / 1000)}s`);
+    }
   }
+  setJobResult(job.id, { outputDir: outDir, cleanOutput: output, cleanStems: res.stems });
+  updateJobProgress(job.id, upscaleTo ? 'upscale_encode' : 'stems', 1);
+  removeDirTolerant(tempDir);
   return { rendered: 1, failed: 0 };
 }

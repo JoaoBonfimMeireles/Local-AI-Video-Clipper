@@ -10,3 +10,6 @@ export * from './content';
 export * from './pauses';
 export * from './meme';
 export * from './clean';
+export * from './upscale';
+export * from './text';
+export * from './thumbnails';

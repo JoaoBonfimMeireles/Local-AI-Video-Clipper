@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Clapperboard, Eraser, Laugh, LayoutDashboard, Library, Settings, Sparkles, Star } from 'lucide-react';
+import { AiUsageBadge } from '@/components/ai-usage-badge';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -32,7 +33,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <NavLink href="/library" icon={<Library className="size-4" />} label="Biblioteca" />
               <NavLink href="/settings" icon={<Settings className="size-4" />} label="Configurações" />
             </nav>
-            <span className="ml-auto hidden text-xs text-muted-foreground sm:block">Processamento 100% local · localhost:3000</span>
+            <AiUsageBadge />
           </div>
         </header>
         <main className="mx-auto max-w-7xl px-4 py-6">{children}</main>

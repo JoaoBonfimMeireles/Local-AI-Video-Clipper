@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { FrameSide, HwAccel, ManualFrame, OutputFormat } from '@clipper/shared';
+import { blockStyle, manualCircle, type BlockStyle, type EnhancedArea, type FrameSide, type HwAccel, type ManualFrame, type ManualLogo, type ManualText, type OutputFormat } from '@clipper/shared';
 import { insertSoundPauses, type SoundPause } from './pauses';
 import { runFfmpeg, sec } from './ffmpeg';
+import { buildTextAss } from './text';
 
 export type OverlayPosition = 'center' | 'top' | 'bottom' | 'top-left' | 'top-right';
 
@@ -12,6 +13,8 @@ export interface RenderZoom {
   scale: number;
   focusX: number;
   focusY: number;
+  /** cam = a câmera (caixa de cima do enquadramento) ocupa a tela toda, aproximada em `scale`. */
+  target?: 'screen' | 'cam';
 }
 
 export interface RenderOverlay {
@@ -89,6 +92,12 @@ export interface RenderSpec {
   manualFrames?: ManualFrame[] | null;
   /** Área do conteúdo no quadro original (ex.: o vídeo assistido num react), sem a facecam nem molduras. */
   content?: { x0: number; y0: number; x1: number; y1: number } | null;
+  /** Cor sólida (#RRGGBB) no lugar do fundo desfocado quando o conteúdo aparece inteiro. */
+  fillColor?: string | null;
+  /** Textos por cima do vídeo (editor manual). */
+  texts?: ManualText[] | null;
+  /** Logo do canal durante o corte todo. */
+  logo?: ManualLogo | null;
   output: string;
   workDir: string;
   hwAccel?: HwAccel;
@@ -163,7 +172,7 @@ function quantizeZoom(s: number): number {
 }
 
 /** Monta os argumentos completos do FFmpeg para um corte. Exportado para testes/debug. */
-export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): { args: string[]; duration: number } {
+export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null, textsFileName: string | null = null): { args: string[]; duration: number } {
   // Enquadramento manual: ignora o da IA (o editor já mostra exatamente o que vai sair)
   const manual = spec.manualFrames?.length ? spec.manualFrames : null;
   if (manual) spec = { ...spec, shots: [], split: null, content: null, contentPhases: null, bubble: null };
@@ -281,13 +290,31 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
     .filter((b) => !(baseKind === 'scale' && b.winW >= srcW - 2 && b.winH >= srcH - 2));
 
   const bubble = !split && spec.bubble ? spec.bubble : null;
-  const branches = 1 + (wideShots.length ? 1 : 0) + focusBranches.length + (bubble ? 1 : 0);
+  // Zoom na câmera: a caixa de cima do enquadramento daquele instante (ou a facecam da IA) na tela toda
+  const camAt = (t: number) => {
+    if (manual) {
+      const fr = [...manual].sort((a, b) => a.at - b.at).find((x) => t >= x.at && t < x.end) ?? manual[manual.length - 1];
+      return fr.box;
+    }
+    return spec.split?.cam ?? spec.bubble ?? null;
+  };
+  const camZooms = (spec.zooms ?? [])
+    .filter((z) => z.target === 'cam' && z.at < duration && z.duration > 0.1)
+    .map((z) => ({ z, box: camAt(z.at) }))
+    .filter((x): x is { z: RenderZoom; box: { x0: number; y0: number; x1: number; y1: number } } => !!x.box);
+  const branches = 1 + (wideShots.length ? 1 : 0) + focusBranches.length + camZooms.length + (bubble ? 1 : 0);
   const srcLabels = Array.from({ length: branches }, (_, i) => `s${i}`);
   if (branches > 1) f.push(`[src]split=${branches}${srcLabels.map((l) => `[${l}]`).join('')}`);
   else srcLabels[0] = 'src';
   let next = 0;
 
+  const fill = spec.fillColor && /^#[0-9a-fA-F]{6}$/.test(spec.fillColor) ? `0x${spec.fillColor.slice(1)}` : null;
   const blurComposite = (input: string, out: string, tag: string, OW = W, OH = H, align = { x: 0.5, y: 0.5 }) => {
+    if (fill) {
+      // Fundo de cor sólida: o conteúdo inteiro, na posição escolhida, com a cor nas sobras
+      f.push(`[${input}]scale=${OW}:${OH}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,pad=${OW}:${OH}:(ow-iw)*${num(align.x, 2)}:(oh-ih)*${num(align.y, 2)}:color=${fill}[${out}]`);
+      return;
+    }
     const bw = even(OW / 4);
     const bh = even(OH / 4);
     f.push(`[${input}]split=2[bga${tag}][fga${tag}]`);
@@ -347,11 +374,59 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
       if (fit === 'blur') blurComposite(input, out, `m${tag}`, OW, OH, align);
       else f.push(`[${input}]scale=${OW}:${OH}:force_original_aspect_ratio=increase,crop=${OW}:${OH}:(iw-${OW})*${num(align.x, 2)}:(ih-${OH})*${num(align.y, 2)},setsar=1[${out}]`);
     };
-    /** Área da fonte numa região OW x OH. */
-    const place = (input: string, box: ManualFrame['box'], fit: ManualFrame['fit'], align: { x: number; y: number }, OW: number, OH: number, out: string, tag: string) => {
-      const px = pxBox(box) ?? whole;
-      f.push(`[${input}]crop=${px.w}:${px.h}:${px.x}:${px.y},setsar=1[mc_${tag}]`);
-      fitTo(`mc_${tag}`, fit, align, OW, OH, out, tag);
+    /** Um quadro parado de w x h na cor dada, repetido o corte todo (o geq que vem depois roda uma vez só). */
+    const still = (w: number, h: number, color: string) =>
+      `color=c=${/^#[0-9a-fA-F]{6}$/.test(color) ? `0x${color.slice(1)}` : 'white'}:s=${w}x${h}:r=${fps},trim=end_frame=1,format=rgba`;
+    const loopStill = `loop=loop=-1:size=1,setpts=N/(${fps}*TB),trim=duration=${num(duration + 0.5)}`;
+    /** Distância com sinal até um retângulo arredondado w x h de raio r: > 0 fora, < 0 dentro (expressão do geq). */
+    const roundedSd = (w: number, h: number, r: number) => {
+      const qx = `(abs(X-${num(w / 2)})-${num(w / 2 - r)})`;
+      const qy = `(abs(Y-${num(h / 2)})-${num(h / 2 - r)})`;
+      return `(hypot(max(${qx},0),max(${qy},0))+min(max(${qx},${qy}),0)-${num(r)})`;
+    };
+    /**
+     * Área da fonte numa região OW x OH. Com moldura (borda/cantos), só o CONTEÚDO ganha cantos arredondados e borda:
+     * o fundo do bloco (desfocado ou a cor escolhida) continua inteiro atrás. Mesmas medidas da prévia (drawRegion).
+     */
+    const place = (input: string, box: ManualFrame['box'], fit: ManualFrame['fit'], align: { x: number; y: number }, OW: number, OH: number, out: string, tag: string, st?: BlockStyle | null, enh?: { label: string; w: number; h: number } | null) => {
+      // Área melhorada (Real-ESRGAN): já vem recortada, numa entrada própria; a cópia do original não é usada
+      const px = enh ? { x: 0, y: 0, w: enh.w, h: enh.h } : (pxBox(box) ?? whole);
+      if (enh) {
+        f.push(`[${input}]nullsink`);
+        f.push(`[${enh.label}]setsar=1[mc_${tag}]`);
+      } else f.push(`[${input}]crop=${px.w}:${px.h}:${px.x}:${px.y},setsar=1[mc_${tag}]`);
+      // Tamanho do conteúdo na tela: o bloco todo (preencher) ou inteiro dentro dele
+      const k = Math.min(OW / px.w, OH / px.h);
+      const fw = fit === 'blur' ? Math.min(OW, even(px.w * k)) : OW;
+      const fh = fit === 'blur' ? Math.min(OH, even(px.h * k)) : OH;
+      const sty = blockStyle(st, W, fw, fh);
+      if (!sty) return fitTo(`mc_${tag}`, fit, align, OW, OH, out, tag);
+      const x = Math.round((OW - fw) * align.x);
+      const y = Math.round((OH - fh) * align.y);
+      f.push(`[mc_${tag}]split=2[mcb_${tag}][mcf_${tag}]`);
+      if (fill) f.push(`[mcb_${tag}]scale=${OW}:${OH},setsar=1,drawbox=x=0:y=0:w=iw:h=ih:color=${fill}:t=fill[mbg_${tag}]`);
+      else {
+        const bw = even(OW / 4);
+        const bh = even(OH / 4);
+        f.push(`[mcb_${tag}]scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},boxblur=10:3,scale=${OW}:${OH},eq=brightness=-0.07:saturation=1.15,setsar=1[mbg_${tag}]`);
+      }
+      f.push(
+        fit === 'blur'
+          ? `[mcf_${tag}]scale=${fw}:${fh},setsar=1,format=rgba[mfg_${tag}]`
+          : `[mcf_${tag}]scale=${fw}:${fh}:force_original_aspect_ratio=increase,crop=${fw}:${fh}:(iw-${fw})*${num(align.x, 2)}:(ih-${fh})*${num(align.y, 2)},setsar=1,format=rgba[mfg_${tag}]`,
+      );
+      const sd = roundedSd(fw, fh, sty.radius);
+      f.push(`color=c=white:s=${fw}x${fh}:r=${fps},trim=end_frame=1,format=gray,geq=lum='if(gt(${sd},0),0,255)',${loopStill}[mmk_${tag}]`);
+      f.push(`[mfg_${tag}][mmk_${tag}]alphamerge[mfa_${tag}]`);
+      let cur = `mbg_${tag}`;
+      f.push(`[${cur}][mfa_${tag}]overlay=x=${x}:y=${y}[mpl_${tag}]`);
+      cur = `mpl_${tag}`;
+      if (sty.border > 0.5) {
+        f.push(`${still(fw, fh, sty.color)},geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(between(${sd},${num(-sty.border)},0),255,0)',${loopStill}[mbd_${tag}]`);
+        f.push(`[${cur}][mbd_${tag}]overlay=x=${x}:y=${y}[mpb_${tag}]`);
+        cur = `mpb_${tag}`;
+      }
+      f.push(`[${cur}]setsar=1[${out}]`);
     };
     /** Conteúdo ao lado (imagem, vídeo ou outra cena): entrada própria, alinhada ao tempo do enquadramento. */
     const sideInput = (sd: FrameSide, fr: ManualFrame, tag: string): string | null => {
@@ -371,23 +446,59 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
       return `si_${tag}`;
     };
     /** Um bloco (tela toda ou metade de cima/baixo): o conteúdo principal e, se houver, o outro conteúdo ao lado. */
-    const block = (input: string, box: ManualFrame['box'], fit: ManualFrame['fit'], align: { x: number; y: number }, sd: FrameSide | null | undefined, fr: ManualFrame, OW: number, OH: number, out: string, tag: string) => {
+    /** Entrada da área melhorada, alinhada ao início do enquadramento (antes repete o 1º quadro, depois o último). */
+    const enhancedInput = (e: EnhancedArea | undefined, fr: ManualFrame, tag: string) => {
+      if (!e || !fs.existsSync(e.file)) return null;
+      const n = idx++;
+      inputs.push('-i', e.file);
+      f.push(`[${n}:v]setpts=PTS-STARTPTS,fps=${fps},tpad=start_mode=clone:start_duration=${num(Math.max(0, fr.at))}:stop_mode=clone:stop_duration=${num(duration)},setsar=1[en_${tag}]`);
+      return { label: `en_${tag}`, w: e.w - (e.w % 2), h: e.h - (e.h % 2) };
+    };
+    const block = (input: string, box: ManualFrame['box'], fit: ManualFrame['fit'], align: { x: number; y: number }, sd: FrameSide | null | undefined, fr: ManualFrame, OW: number, OH: number, out: string, tag: string, st?: BlockStyle | null, e?: EnhancedArea) => {
+      const enh = enhancedInput(e, fr, tag);
       const si = sd ? sideInput(sd, fr, tag) : null;
-      if (!sd || !si) return place(input, box, fit, align, OW, OH, out, tag);
+      if (!sd || !si) return place(input, box, fit, align, OW, OH, out, tag, st, enh);
       const sw = even(OW * Math.min(0.8, Math.max(0.2, sd.width)));
       const mw = OW - sw;
-      place(input, box, fit, align, mw, OH, `bm_${tag}`, `${tag}m`);
+      place(input, box, fit, align, mw, OH, `bm_${tag}`, `${tag}m`, st, enh);
       fitTo(si, sd.fit, A(sd.align), sw, OH, `bs_${tag}`, `${tag}s`);
       f.push(sd.side === 'left' ? `[bs_${tag}][bm_${tag}]hstack=inputs=2,setsar=1[${out}]` : `[bm_${tag}][bs_${tag}]hstack=inputs=2,setsar=1[${out}]`);
     };
     frames.forEach((fr, i) => {
-      if (twoBoxes(fr)) {
+      if (twoBoxes(fr) && fr.camShape === 'circle') {
+        // Câmera num círculo por cima do conteúdo, que ocupa a tela toda (mesmas medidas de manualCircle)
+        block(ins[k++], fr.box2!, fr.fit, A(fr.alignBottom), fr.sideBottom, fr, W, H, `mcc${i}`, `b${i}`, null, fr.enhancedBottom);
+        const c = manualCircle(fr, W, H);
+        const D = even(c.d);
+        const px = pxBox(fr.box) ?? whole;
+        const enh = enhancedInput(fr.enhancedTop, fr, `c${i}`);
+        if (enh) f.push(`[${ins[k++]}]nullsink`);
+        f.push(
+          `[${enh ? enh.label : ins[k++]}]${enh ? '' : `crop=${px.w}:${px.h}:${px.x}:${px.y},`}scale=${D}:${D}:force_original_aspect_ratio=increase,crop=${D}:${D},format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(hypot(X-${D / 2},Y-${D / 2}),${D / 2 - 1}),255,0)'[mcf${i}]`,
+        );
+        let under = `mcc${i}`;
+        if (c.ring >= 0.5) {
+          // Aro na cor escolhida (0 = sem aro)
+          const R = Math.round(D / 2 + c.ring);
+          f.push(`${still(2 * R, 2 * R, c.ringColor)},geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte(hypot(X-${R},Y-${R}),${R - 1}),255,0)',${loopStill}[mring${i}]`);
+          f.push(`[mcc${i}][mring${i}]overlay=x=${Math.round(c.cx - R)}:y=${Math.round(c.cy - R)}[mcr${i}]`);
+          under = `mcr${i}`;
+        }
+        f.push(`[${under}][mcf${i}]overlay=x=${Math.round(c.cx - D / 2)}:y=${Math.round(c.cy - D / 2)}[mf${i}]`);
+      } else if (twoBoxes(fr)) {
         const topH = even(H * Math.min(0.8, Math.max(0.2, fr.topRatio ?? 0.4)));
-        block(ins[k++], fr.box, fr.fitTop ?? 'cover', A(fr.alignTop), fr.sideTop, fr, W, topH, `mt${i}`, `t${i}`);
-        block(ins[k++], fr.box2!, fr.fit, A(fr.alignBottom), fr.sideBottom, fr, W, H - topH, `mb${i}`, `b${i}`);
-        f.push(`[mt${i}][mb${i}]vstack=inputs=2,setsar=1[mf${i}]`);
+        // Bloco de baixo menor que o resto da tela: a sobra fica embaixo, na cor de fundo
+        const botH = fr.bottomRatio ? Math.min(H - topH, even(H * fr.bottomRatio)) : H - topH;
+        block(ins[k++], fr.box, fr.fitTop ?? 'cover', A(fr.alignTop), fr.sideTop, fr, W, topH, `mt${i}`, `t${i}`, fr.styleTop, fr.enhancedTop);
+        block(ins[k++], fr.box2!, fr.fit, A(fr.alignBottom), fr.sideBottom, fr, W, botH, `mb${i}`, `b${i}`, fr.styleBottom, fr.enhancedBottom);
+        let bot = `mb${i}`;
+        if (botH < H - topH) {
+          f.push(`[mb${i}]pad=${W}:${H - topH}:0:0:color=${fill ?? 'black'}[mbp${i}]`);
+          bot = `mbp${i}`;
+        }
+        f.push(`[mt${i}][${bot}]vstack=inputs=2,setsar=1[mf${i}]`);
       } else {
-        block(ins[k++], fr.box, fr.fit, A(fr.alignTop), fr.sideTop, fr, W, H, `mf${i}`, `s${i}`);
+        block(ins[k++], fr.box, fr.fit, A(fr.alignTop), fr.sideTop, fr, W, H, `mf${i}`, `s${i}`, null, fr.enhancedTop);
       }
     });
     let cur = 'mf0';
@@ -502,7 +613,7 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
 
   // 3) Zooms (punch-in): agrupados em até 3 níveis; x/y variam por expressão em cada janela
   const zooms = (spec.zooms ?? [])
-    .filter((z) => z.at < duration && z.duration > 0.1)
+    .filter((z) => z.target !== 'cam' && z.at < duration && z.duration > 0.1)
     .map((z) => (personFraming ? { ...z, scale: Math.min(z.scale, 1.12), focusY: Math.min(z.focusY, 0.35) } : z));
   const levels = new Map<number, RenderZoom[]>();
   for (const z of zooms) {
@@ -531,6 +642,21 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
     label = `zo${zi}`;
     zi++;
   }
+
+  // 3a) Zoom na câmera: a área da câmera (aproximada em `scale`, em volta do centro) na tela toda
+  camZooms.forEach(({ z, box }, i) => {
+    const s = Math.min(3, Math.max(1, z.scale));
+    const cx = (box.x0 + box.x1) / 2;
+    const cy = (box.y0 + box.y1) / 2;
+    const hw = (box.x1 - box.x0) / 2 / s;
+    const hh = (box.y1 - box.y0) / 2 / s;
+    const px = pxBox({ x0: cx - hw, y0: cy - hh, x1: cx + hw, y1: cy + hh }) ?? { x: 0, y: 0, w: even(srcW), h: even(srcH) };
+    const a = Math.max(0, z.at);
+    const b = Math.min(duration, z.at + z.duration);
+    f.push(`[${srcLabels[next++]}]crop=${px.w}:${px.h}:${px.x}:${px.y},scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1[czv${i}]`);
+    f.push(`[${label}][czv${i}]overlay=x=0:y=0:enable='between(t,${num(a)},${num(b)})'[czo${i}]`);
+    label = `czo${i}`;
+  });
 
   // 3b) Rosto do streamer num círculo (modo "só o rosto"): canto superior direito, com aro branco
   if (bubble) {
@@ -586,6 +712,22 @@ export function buildRenderArgs(spec: RenderSpec, subsFileName: string | null): 
       audioInputs.push(`[ova${i}]`);
     }
   });
+
+  // 4b) Logo do canal (centro e altura em frações do quadro), o corte todo; GIF animado fica em loop
+  if (spec.logo && fs.existsSync(spec.logo.file)) {
+    inputs.push(...overlayInputArgs(spec.logo.file, duration));
+    const k = idx++;
+    const lh = even(H * Math.min(0.5, Math.max(0.02, spec.logo.size)));
+    f.push(`[${k}:v]fps=${fps},scale=-2:${lh},format=rgba[logo]`);
+    f.push(`[${label}][logo]overlay=x=${Math.round(spec.logo.x * W)}-overlay_w/2:y=${Math.round(spec.logo.y * H)}-overlay_h/2:eof_action=repeat[vlogo]`);
+    label = 'vlogo';
+  }
+
+  // 4c) Textos do editor
+  if (textsFileName) {
+    f.push(`[${label}]subtitles=filename=${textsFileName}[vtxt]`);
+    label = 'vtxt';
+  }
 
   // 5) Legendas (por último, ficam por cima dos memes)
   if (subsFileName) {
@@ -672,14 +814,20 @@ export async function renderClip(spec: RenderSpec): Promise<void> {
     subsName = 'subs.ass';
     fs.writeFileSync(path.join(spec.workDir, subsName), spec.assContent, 'utf8');
   }
-  const { args, duration } = buildRenderArgs(spec, subsName);
+  let textsName: string | null = null;
+  const textAss = spec.texts?.length ? buildTextAss(spec.texts, canvasSize(spec.format, spec.source), spec.end - spec.start) : null;
+  if (textAss) {
+    textsName = 'texts.ass';
+    fs.writeFileSync(path.join(spec.workDir, textsName), textAss, 'utf8');
+  }
+  const { args, duration } = buildRenderArgs(spec, subsName, textsName);
   fs.writeFileSync(path.join(spec.workDir, 'ffmpeg-args.json'), JSON.stringify(args, null, 2));
   try {
     await runFfmpeg(args, { cwd: spec.workDir, signal: spec.signal, expectedDuration: duration, onProgress: spec.onProgress });
   } catch (e) {
     // NVENC indisponível/ocupado: tenta de novo em CPU
     if (spec.hwAccel === 'nvenc' && !spec.signal?.aborted) {
-      const retry = buildRenderArgs({ ...spec, hwAccel: 'none' }, subsName);
+      const retry = buildRenderArgs({ ...spec, hwAccel: 'none' }, subsName, textsName);
       await runFfmpeg(retry.args, { cwd: spec.workDir, signal: spec.signal, expectedDuration: duration, onProgress: spec.onProgress });
       return;
     }

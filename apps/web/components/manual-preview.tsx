@@ -3,11 +3,14 @@
 // (mesmas regras do renderizador: preencher / inteiro com fundo desfocado / câmera + conteúdo), os zooms, os
 // memes e os sons. Também traz o editor de quadros: caixas arrastáveis sobre o quadro original, por trecho.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Pause, Play, Scissors, Trash2, ZoomIn, ZoomOut } from 'lucide-react';
-import type { FrameBox, FrameSide, ManualEdit, ManualFrame } from '@clipper/shared';
+import { Check, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Loader2, Pause, Play, Scissors, Sparkles, Trash2, ZoomIn, ZoomOut } from 'lucide-react';
+import { blockStyle, manualCircle, TEXT_ASCENT, TEXT_ASS_SCALE, TEXT_BOX_PAD, TEXT_FONT, textLines, textSpan, type BlockStyle, type FrameBox, type FrameSide, type ManualEdit, type ManualFrame, type ManualText, type UpscaleModel, UPSCALE_MODELS, upscaleModelLabel } from '@clipper/shared';
+import { EnhanceCompare, type EnhanceShot } from '@/components/enhance-compare';
 import { Button } from '@/components/ui/button';
 import { fileUrl } from '@/lib/client';
 import { cn } from '@/lib/utils';
+import { SpeedPicker } from '@/components/speed-picker';
+import { withSpeed } from '@/lib/playback-speed';
 
 type Segment = ManualEdit['segments'][number];
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
@@ -207,47 +210,69 @@ type Drawable = HTMLVideoElement | HTMLImageElement;
 const dimsOf = (el: Drawable) => (el instanceof HTMLVideoElement ? { w: el.videoWidth, h: el.videoHeight } : { w: el.naturalWidth, h: el.naturalHeight });
 const MID = { x: 0.5, y: 0.5 };
 
-function drawRegion(ctx: CanvasRenderingContext2D, v: Drawable, box: FrameBox, fit: 'cover' | 'blur', dx: number, dy: number, dw: number, dh: number, align: { x: number; y: number } = MID) {
+/** Moldura do conteúdo (borda/cantos) em px do canvas: style + largura do canvas (as frações são da largura da tela). */
+type Framed = { style?: BlockStyle | null; cw: number };
+
+function drawRegion(ctx: CanvasRenderingContext2D, v: Drawable, box: FrameBox, fit: 'cover' | 'blur', dx: number, dy: number, dw: number, dh: number, align: { x: number; y: number } = MID, bg?: string | null, framed?: Framed) {
   const { w: vw, h: vh } = dimsOf(v);
   if (!vw || !vh) return;
   const sx = box.x0 * vw;
   const sy = box.y0 * vh;
   const sw = Math.max(2, (box.x1 - box.x0) * vw);
   const sh = Math.max(2, (box.y1 - box.y0) * vh);
-  const cover = () => {
+  /** Desenha a área preenchendo (x, y, w, h), aparando as sobras do lado escolhido. */
+  const cover = (x: number, y: number, w: number, h: number, al: { x: number; y: number }) => {
     let cx = sx;
     let cy = sy;
     let cw = sw;
     let ch = sh;
-    if (cw / ch > dw / dh) {
-      const n = (ch * dw) / dh;
-      cx += (cw - n) * align.x;
+    if (cw / ch > w / h) {
+      const n = (ch * w) / h;
+      cx += (cw - n) * al.x;
       cw = n;
     } else {
-      const n = (cw * dh) / dw;
-      cy += (ch - n) * align.y;
+      const n = (cw * h) / w;
+      cy += (ch - n) * al.y;
       ch = n;
     }
-    ctx.drawImage(v, cx, cy, cw, ch, dx, dy, dw, dh);
+    ctx.drawImage(v, cx, cy, cw, ch, x, y, w, h);
   };
+  // Onde o conteúdo fica: o bloco todo (preencher) ou inteiro dentro dele, na posição escolhida
+  const s = Math.min(dw / sw, dh / sh);
+  const fg = fit === 'cover' ? { x: dx, y: dy, w: dw, h: dh } : { x: dx + (dw - sw * s) * align.x, y: dy + (dh - sh * s) * align.y, w: sw * s, h: sh * s };
+  const sty = framed ? blockStyle(framed.style, framed.cw, fg.w, fg.h) : null;
   ctx.save();
   ctx.beginPath();
   ctx.rect(dx, dy, dw, dh);
   ctx.clip();
-  if (fit === 'cover') {
-    cover();
-    ctx.restore();
-    return;
+  // Fundo (aparece em "Inteiro" e, com cantos arredondados, atrás dos cantos): a cor escolhida ou a área desfocada
+  if (fit === 'blur' || sty) {
+    if (bg) {
+      ctx.fillStyle = bg;
+      ctx.fillRect(dx, dy, dw, dh);
+    } else {
+      ctx.filter = 'blur(10px) brightness(0.93) saturate(1.15)';
+      cover(dx, dy, dw, dh, MID);
+      ctx.filter = 'none';
+    }
   }
-  // Fundo: a mesma área ampliada e desfocada; frente: a área inteira, na posição escolhida
-  ctx.filter = 'blur(10px) brightness(0.93) saturate(1.15)';
-  const keep = align;
-  align = MID;
-  cover();
-  align = keep;
-  ctx.filter = 'none';
-  const s = Math.min(dw / sw, dh / sh);
-  ctx.drawImage(v, sx, sy, sw, sh, dx + (dw - sw * s) * align.x, dy + (dh - sh * s) * align.y, sw * s, sh * s);
+  // Conteúdo: só ele ganha os cantos arredondados e a borda
+  ctx.save();
+  if (sty && sty.radius > 0) {
+    ctx.beginPath();
+    ctx.roundRect(fg.x, fg.y, fg.w, fg.h, sty.radius);
+    ctx.clip();
+  }
+  if (fit === 'cover') cover(fg.x, fg.y, fg.w, fg.h, align);
+  else ctx.drawImage(v, sx, sy, sw, sh, fg.x, fg.y, fg.w, fg.h);
+  ctx.restore();
+  if (sty && sty.border > 0) {
+    ctx.beginPath();
+    ctx.roundRect(fg.x, fg.y, fg.w, fg.h, sty.radius);
+    ctx.roundRect(fg.x + sty.border, fg.y + sty.border, fg.w - 2 * sty.border, fg.h - 2 * sty.border, Math.max(0, sty.radius - sty.border));
+    ctx.fillStyle = sty.color;
+    ctx.fill('evenodd');
+  }
   ctx.restore();
 }
 
@@ -256,30 +281,92 @@ const WHOLE: FrameBox = { x0: 0, y0: 0, x1: 1, y1: 1 };
 export type SideResolver = (sd: FrameSide, fr: ManualFrame) => Drawable | null;
 
 /** Um bloco: conteúdo principal e, se houver, o outro conteúdo ao lado (mesma divisão do render). */
-function drawBlock(ctx: CanvasRenderingContext2D, v: Drawable, box: FrameBox, fit: 'cover' | 'blur', align: { x: number; y: number } | undefined, sd: FrameSide | null | undefined, fr: ManualFrame, getSide: SideResolver | undefined, dx: number, dy: number, dw: number, dh: number) {
-  if (!sd) return drawRegion(ctx, v, box, fit, dx, dy, dw, dh, align ?? MID);
+function drawBlock(ctx: CanvasRenderingContext2D, v: Drawable, box: FrameBox, fit: 'cover' | 'blur', align: { x: number; y: number } | undefined, sd: FrameSide | null | undefined, fr: ManualFrame, getSide: SideResolver | undefined, dx: number, dy: number, dw: number, dh: number, bg?: string | null, framed?: Framed) {
+  if (!sd) return drawRegion(ctx, v, box, fit, dx, dy, dw, dh, align ?? MID, bg, framed);
   const sw = Math.round(dw * clamp(sd.width, 0.2, 0.8));
   const mw = dw - sw;
   const mx = sd.side === 'left' ? dx + sw : dx;
   const sx = sd.side === 'left' ? dx : dx + mw;
-  drawRegion(ctx, v, box, fit, mx, dy, mw, dh, align ?? MID);
+  drawRegion(ctx, v, box, fit, mx, dy, mw, dh, align ?? MID, bg, framed);
   const el = getSide?.(sd, fr);
-  if (el) drawRegion(ctx, el, sd.kind === 'scene' ? (sd.box ?? WHOLE) : WHOLE, sd.fit, sx, dy, sw, dh, sd.align ?? MID);
+  if (el) drawRegion(ctx, el, sd.kind === 'scene' ? (sd.box ?? WHOLE) : WHOLE, sd.fit, sx, dy, sw, dh, sd.align ?? MID, bg);
   else {
     ctx.fillStyle = '#18181b';
     ctx.fillRect(sx, dy, sw, dh);
   }
 }
 
-export function drawLayout(ctx: CanvasRenderingContext2D, v: HTMLVideoElement, fr: ManualFrame, cw: number, ch: number, getSide?: SideResolver) {
+export function drawLayout(ctx: CanvasRenderingContext2D, v: HTMLVideoElement, fr: ManualFrame, cw: number, ch: number, getSide?: SideResolver, bg?: string | null) {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, cw, ch);
   if (!v.videoWidth) return;
-  if (fr.mode === 'split' && fr.box2) {
+  if (fr.mode === 'split' && fr.box2 && fr.camShape === 'circle') {
+    // Conteúdo na tela toda e o rosto num círculo com aro branco (mesmas medidas do render)
+    drawBlock(ctx, v, fr.box2, fr.fit, fr.alignBottom, fr.sideBottom, fr, getSide, 0, 0, cw, ch, bg);
+    const c = manualCircle(fr, cw, ch);
+    if (c.ring >= 0.5 * (cw / 1080)) {
+      ctx.fillStyle = c.ringColor;
+      ctx.beginPath();
+      ctx.arc(c.cx, c.cy, c.d / 2 + c.ring, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(c.cx, c.cy, c.d / 2, 0, Math.PI * 2);
+    ctx.clip();
+    drawRegion(ctx, v, fr.box, 'cover', c.cx - c.d / 2, c.cy - c.d / 2, c.d, c.d);
+    ctx.restore();
+  } else if (fr.mode === 'split' && fr.box2) {
     const top = Math.round(ch * clamp(fr.topRatio ?? 0.4, 0.2, 0.8));
-    drawBlock(ctx, v, fr.box, fr.fitTop ?? 'cover', fr.alignTop, fr.sideTop, fr, getSide, 0, 0, cw, top);
-    drawBlock(ctx, v, fr.box2, fr.fit, fr.alignBottom, fr.sideBottom, fr, getSide, 0, top, cw, ch - top);
-  } else drawBlock(ctx, v, fr.box, fr.fit, fr.alignTop, fr.sideTop, fr, getSide, 0, 0, cw, ch);
+    // Bloco de baixo menor: a sobra embaixo fica na cor de fundo (preto se o fundo é desfocado), como no render
+    const bot = fr.bottomRatio ? Math.min(ch - top, Math.round(ch * fr.bottomRatio)) : ch - top;
+    ctx.fillStyle = bg ?? '#000';
+    ctx.fillRect(0, top, cw, ch - top);
+    drawBlock(ctx, v, fr.box, fr.fitTop ?? 'cover', fr.alignTop, fr.sideTop, fr, getSide, 0, 0, cw, top, bg, { style: fr.styleTop, cw });
+    drawBlock(ctx, v, fr.box2, fr.fit, fr.alignBottom, fr.sideBottom, fr, getSide, 0, top, cw, bot, bg, { style: fr.styleBottom, cw });
+  } else drawBlock(ctx, v, fr.box, fr.fit, fr.alignTop, fr.sideTop, fr, getSide, 0, 0, cw, ch, bg);
+}
+
+/** Retângulos (px do canvas) de cada linha de um texto, com a caixa e a linha de base (mesmas medidas do ASS). */
+function textLayout(ctx: CanvasRenderingContext2D, t: ManualText, cw: number, ch: number) {
+  const em = t.size * cw;
+  const lineH = em * TEXT_ASS_SCALE;
+  const rows = textLines(t.text);
+  ctx.font = `900 ${em}px "${TEXT_FONT}", Arial, sans-serif`;
+  const top = t.y * ch - (rows.length * lineH) / 2;
+  const lines = rows.map((r, i) => {
+    const w = ctx.measureText(r).width;
+    return { text: r, x: t.x * cw - w / 2, w, top: top + i * lineH, base: top + i * lineH + em * TEXT_ASCENT };
+  });
+  const pad = em * TEXT_BOX_PAD;
+  const maxW = Math.max(0, ...lines.map((l) => l.w));
+  return { em, lineH, lines, pad, bounds: { x0: t.x * cw - maxW / 2 - pad, y0: top - pad, x1: t.x * cw + maxW / 2 + pad, y1: top + rows.length * lineH + pad } };
+}
+
+/** Desenha um texto como o libass: caixa por linha (BorderStyle 3), depois borda e preenchimento. */
+function drawText(ctx: CanvasRenderingContext2D, t: ManualText, cw: number, ch: number) {
+  const L = textLayout(ctx, t, cw, ch);
+  ctx.save();
+  if (t.box) {
+    ctx.globalAlpha = clamp(t.boxOpacity, 0, 1);
+    ctx.fillStyle = t.boxColor;
+    for (const l of L.lines) if (l.text) ctx.fillRect(l.x - L.pad, l.top - L.pad, l.w + 2 * L.pad, L.lineH + 2 * L.pad);
+    ctx.globalAlpha = 1;
+  }
+  ctx.textBaseline = 'alphabetic';
+  ctx.lineJoin = 'round';
+  const bord = Math.max(0, t.outline) * L.em;
+  for (const l of L.lines) {
+    if (bord > 0) {
+      ctx.strokeStyle = t.outlineColor;
+      ctx.lineWidth = bord * 2;
+      ctx.strokeText(l.text, l.x, l.base);
+    }
+    ctx.fillStyle = t.color;
+    ctx.fillText(l.text, l.x, l.base);
+  }
+  ctx.restore();
+  return L.bounds;
 }
 
 // ---------------- Prévia ao vivo ----------------
@@ -305,6 +392,11 @@ export function LivePreview({
   W,
   H,
   sceneUrl,
+  texts = [],
+  logo,
+  background,
+  onMoveText,
+  onMoveLogo,
 }: {
   player: ClipPlayer;
   frames: ManualFrame[];
@@ -315,7 +407,25 @@ export function LivePreview({
   H: number;
   /** Vídeo original inteiro tocável (para "outra cena" ao lado). */
   sceneUrl?: string | null;
+  texts?: ManualText[];
+  /** Logo do canal (url para a prévia; centro e altura em frações do quadro). */
+  logo?: { url: string; x: number; y: number; size: number } | null;
+  /** Cor no lugar do fundo desfocado. */
+  background?: string | null;
+  /** Arrastar um texto / a logo na prévia (novo centro, frações do quadro). */
+  onMoveText?: (i: number, x: number, y: number) => void;
+  onMoveLogo?: (x: number, y: number) => void;
 }) {
+  // Caixas (px do canvas) do que pode ser arrastado, atualizadas a cada quadro desenhado
+  const hits = useRef<{ kind: 'text' | 'logo'; i: number; x0: number; y0: number; x1: number; y1: number; cx: number; cy: number }[]>([]);
+  const dragItem = useRef<{ kind: 'text' | 'logo'; i: number; px: number; py: number; cx: number; cy: number; moved: boolean } | null>(null);
+  const logoEl = useRef<HTMLImageElement | null>(null);
+  if (logo && logoEl.current?.dataset.url !== logo.url) {
+    const img = new Image();
+    img.dataset.url = logo.url;
+    img.src = logo.url;
+    logoEl.current = img;
+  }
   const canvas = useRef<HTMLCanvasElement>(null);
   const off = useRef<HTMLCanvasElement | null>(null);
   // Conteúdos ao lado: um elemento por arquivo, sincronizado com o tempo do corte
@@ -343,7 +453,7 @@ export function LivePreview({
         const v = player.video.current;
         const want = Math.max(0, (sd.start ?? 0) + (player.now() - fr.at));
         if (Math.abs(el.currentTime - want) > 0.35) el.currentTime = want;
-        if (v && !v.paused && el.paused) el.play().catch(() => undefined);
+        if (v && !v.paused && el.paused) withSpeed(el).play().catch(() => undefined);
         if ((!v || v.paused) && !el.paused) el.pause();
         return el.readyState >= 2 ? el : null;
       }
@@ -392,10 +502,20 @@ export function LivePreview({
       const o = off.current;
       o.width = CW;
       o.height = CH;
-      drawLayout(o.getContext('2d')!, v, frameAt(frames, t), CW, CH, getSide);
-      // Zoom (punch-in) por cima do enquadramento, como no render
-      const z = zooms.find((zz) => t >= zz.at && t < zz.at + zz.duration);
-      if (z) {
+      drawLayout(o.getContext('2d')!, v, frameAt(frames, t), CW, CH, getSide, background);
+      // Zoom (punch-in) por cima do enquadramento, como no render; o zoom na câmera vence
+      const camZ = zooms.find((zz) => zz.target === 'cam' && t >= zz.at && t < zz.at + zz.duration);
+      const z = zooms.find((zz) => zz.target !== 'cam' && t >= zz.at && t < zz.at + zz.duration);
+      if (camZ) {
+        // A câmera do enquadramento daquele instante na tela toda, aproximada em volta do centro
+        const b = frameAt(frames, camZ.at).box;
+        const s = clamp(camZ.scale, 1, 3);
+        const cx = (b.x0 + b.x1) / 2;
+        const cy = (b.y0 + b.y1) / 2;
+        const hw = (b.x1 - b.x0) / 2 / s;
+        const hh = (b.y1 - b.y0) / 2 / s;
+        drawRegion(ctx, v, { x0: cx - hw, y0: cy - hh, x1: cx + hw, y1: cy + hh }, 'cover', 0, 0, CW, CH);
+      } else if (z) {
         const zw = CW / z.scale;
         const zh = CH / z.scale;
         const zx = clamp(z.focusX * CW - zw / 2, 0, CW - zw);
@@ -413,7 +533,7 @@ export function LivePreview({
             el.muted = ov.audioMode === 'video';
             if (el.paused) {
               el.currentTime = Math.max(0, t - ov.at);
-              el.play().catch(() => undefined);
+              withSpeed(el).play().catch(() => undefined);
             }
           } else if (!el.paused) el.pause();
           if (on && !el.muted) duck = Math.min(duck, ov.audioMode === 'meme' ? 0 : 0.3);
@@ -444,9 +564,28 @@ export function LivePreview({
       }
       v.volume = duck;
 
+      // Logo e textos (por cima dos memes, como no render)
+      const hs: typeof hits.current = [];
+      const lg = logoEl.current;
+      if (logo && lg?.complete && lg.naturalWidth) {
+        const lh = CH * clamp(logo.size, 0.02, 0.5);
+        const lw = (lh * lg.naturalWidth) / lg.naturalHeight;
+        const lx = logo.x * CW - lw / 2;
+        const ly = logo.y * CH - lh / 2;
+        ctx.drawImage(lg, lx, ly, lw, lh);
+        hs.push({ kind: 'logo', i: 0, x0: lx, y0: ly, x1: lx + lw, y1: ly + lh, cx: logo.x, cy: logo.y });
+      }
+      texts.forEach((tx, i) => {
+        const sp = textSpan(tx, player.total);
+        if (t < sp.at || t >= sp.end || !tx.text.trim()) return;
+        const b = drawText(ctx, tx, CW, CH);
+        hs.push({ kind: 'text', i, ...b, cx: tx.x, cy: tx.y });
+      });
+      hits.current = hs;
+
       // Sons: tocam quando o tempo passa pelo instante deles
       if (!v.paused) for (const s of sfx) if (lastT.current < s.at && t >= s.at && t - s.at < 0.5) {
-        const a = new Audio(s.url);
+        const a = withSpeed(new Audio(s.url));
         a.volume = clamp(s.volume, 0, 1);
         a.play().catch(() => undefined);
       }
@@ -454,11 +593,49 @@ export function LivePreview({
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [player, frames, zooms, overlays, sfx, CW, CH, getSide]);
+  }, [player, frames, zooms, overlays, sfx, CW, CH, getSide, texts, logo, background]);
+
+  // Clique toca/pausa; arrastar um texto ou a logo muda a posição
+  const toCanvas = (e: React.PointerEvent) => {
+    const r = canvas.current!.getBoundingClientRect();
+    return { x: ((e.clientX - r.left) / r.width) * CW, y: ((e.clientY - r.top) / r.height) * CH };
+  };
+  const onDown = (e: React.PointerEvent) => {
+    const p = toCanvas(e);
+    const h = [...hits.current].reverse().find((b) => p.x >= b.x0 && p.x <= b.x1 && p.y >= b.y0 && p.y <= b.y1 && (b.kind === 'text' ? onMoveText : onMoveLogo));
+    if (!h) return;
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    dragItem.current = { kind: h.kind, i: h.i, px: p.x, py: p.y, cx: h.cx, cy: h.cy, moved: false };
+  };
+  const onMove = (e: React.PointerEvent) => {
+    const d = dragItem.current;
+    if (!d) return;
+    const p = toCanvas(e);
+    if (!d.moved && Math.hypot(p.x - d.px, p.y - d.py) < 3) return;
+    d.moved = true;
+    const x = r2(clamp(d.cx + (p.x - d.px) / CW, 0, 1));
+    const y = r2(clamp(d.cy + (p.y - d.py) / CH, 0, 1));
+    if (d.kind === 'text') onMoveText?.(d.i, x, y);
+    else onMoveLogo?.(x, y);
+  };
+  const onUp = () => {
+    const d = dragItem.current;
+    dragItem.current = null;
+    if (!d?.moved) player.toggle();
+  };
 
   return (
     <div className="space-y-2">
-      <canvas ref={canvas} width={CW} height={CH} className="mx-auto block w-full max-w-[300px] rounded-lg bg-black" onClick={player.toggle} />
+      <canvas
+        ref={canvas}
+        width={CW}
+        height={CH}
+        className="mx-auto block w-full max-w-[300px] touch-none rounded-lg bg-black"
+        onPointerDown={onDown}
+        onPointerMove={onMove}
+        onPointerUp={onUp}
+        onPointerCancel={() => (dragItem.current = null)}
+      />
       <div className="flex items-center gap-2">
         <Button size="icon" variant="outline" className="size-8 shrink-0" onClick={player.toggle} title={player.playing ? 'Pausar' : 'Tocar'}>
           {player.playing ? <Pause className="size-4" /> : <Play className="size-4" />}
@@ -468,6 +645,7 @@ export function LivePreview({
           {player.t.toFixed(1)}/{player.total.toFixed(1)}s
         </span>
       </div>
+      <SpeedPicker />
     </div>
   );
 }
@@ -483,6 +661,9 @@ export function FramingEditor({
   W,
   H,
   toOriginal,
+  onCut,
+  background,
+  enhancePreview,
 }: {
   player: ClipPlayer;
   frames: ManualFrame[];
@@ -491,6 +672,12 @@ export function FramingEditor({
   H: number;
   /** Tempo do corte -> segundo do vídeo original (para "outra cena" começar no momento atual). */
   toOriginal?: (t: number) => number;
+  /** Apaga o trecho [a, b) do corte (tempo do corte). */
+  onCut?: (a: number, b: number) => void;
+  /** Cor no lugar do fundo desfocado (só para o nome do botão). */
+  background?: string | null;
+  /** Prévia do "Melhorar qualidade": um quadro da área no momento atual, antes e depois (caminhos das imagens). */
+  enhancePreview?: EnhancePreviewFn;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const area = useRef<HTMLDivElement>(null);
@@ -522,13 +709,20 @@ export function FramingEditor({
   if (!fr || !vw) return <p className="text-xs text-muted-foreground">Carregando o vídeo original…</p>;
 
   const top = clamp(fr.topRatio ?? 0.4, 0.2, 0.8);
+  const circle = fr.mode === 'split' && fr.camShape === 'circle';
   /** Proporção travada de cada caixa (null = livre, quando mostra inteira com fundo desfocado). */
   const lockFor = (which: 'box' | 'box2', f: ManualFrame): number | null => {
     // Com um conteúdo ao lado, o principal fica com o resto da largura do bloco
     const mw = (sd?: FrameSide | null) => W * (1 - (sd ? clamp(sd.width, 0.2, 0.8) : 0));
+    if (f.mode === 'split' && f.camShape === 'circle') {
+      // Círculo: recorte quadrado no rosto; o conteúdo ocupa a tela toda
+      if (which === 'box') return 1;
+      return f.fit === 'cover' ? mw(f.sideBottom) / H : null;
+    }
     if (f.mode === 'split') {
       if (which === 'box') return (f.fitTop ?? 'cover') === 'cover' ? mw(f.sideTop) / (H * (f.topRatio ?? 0.4)) : null;
-      return f.fit === 'cover' ? mw(f.sideBottom) / (H * (1 - (f.topRatio ?? 0.4))) : null;
+      const rest = 1 - (f.topRatio ?? 0.4);
+      return f.fit === 'cover' ? mw(f.sideBottom) / (H * Math.min(rest, f.bottomRatio ?? rest)) : null;
     }
     return f.fit === 'cover' ? mw(f.sideTop) / H : null;
   };
@@ -607,12 +801,17 @@ export function FramingEditor({
   };
 
   const boxes: { which: 'box' | 'box2'; label: string; color: string }[] =
-    fr.mode === 'split' ? [{ which: 'box', label: 'Câmera (em cima)', color: '#facc15' }, { which: 'box2', label: 'Conteúdo (embaixo)', color: '#38bdf8' }] : [{ which: 'box', label: 'O que aparece', color: '#facc15' }];
+    fr.mode === 'split'
+      ? [
+          { which: 'box', label: circle ? 'Rosto (círculo)' : 'Câmera (em cima)', color: '#facc15' },
+          { which: 'box2', label: circle ? 'Conteúdo (tela toda)' : 'Conteúdo (embaixo)', color: '#38bdf8' },
+        ]
+      : [{ which: 'box', label: 'O que aparece', color: '#facc15' }];
 
   return (
     <div className="space-y-2">
       {/* Linha do tempo detalhada: miniaturas, zoom, quadro a quadro e bordas arrastáveis */}
-      <FrameTimeline player={player} frames={frames} current={idx} onChange={onChange} />
+      <FrameTimeline player={player} frames={frames} current={idx} onChange={onChange} onCut={onCut} />
 
       <div className="flex flex-wrap items-center gap-1.5 text-xs">
         <div className="flex overflow-hidden rounded-md border">
@@ -631,7 +830,7 @@ export function FramingEditor({
         <div className="flex overflow-hidden rounded-md border">
           {(['cover', 'blur'] as const).map((fit) => (
             <button key={fit} className={cn('px-2 py-1', fr.fit === fit ? 'bg-primary text-primary-foreground' : 'hover:bg-muted')} onClick={() => setFrame({ fit }, true)}>
-              {fit === 'cover' ? 'Preencher a tela' : 'Inteiro (fundo desfocado)'}
+              {fit === 'cover' ? 'Preencher a tela' : background ? 'Inteiro (fundo de cor)' : 'Inteiro (fundo desfocado)'}
             </button>
           ))}
         </div>
@@ -646,15 +845,57 @@ export function FramingEditor({
       </div>
 
       {fr.mode === 'split' && (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-muted-foreground">Câmera:</span>
+          <Seg
+            value={fr.camShape ?? 'rect'}
+            options={[
+              ['rect', '▭ Quadrado'],
+              ['circle', '◯ Círculo'],
+            ]}
+            onChange={(camShape) => setFrame(camShape === 'circle' ? { camShape, alignTop: { x: 0.5, y: 0 }, topRatio: 0.4 } : { camShape: undefined, alignTop: undefined }, true)}
+          />
+          {circle && <span className="text-muted-foreground">o rosto fica num círculo por cima do conteúdo, que ocupa a tela toda</span>}
+        </div>
+      )}
+      {fr.mode === 'split' && (
         <label className="flex items-center gap-2 text-xs">
-          <span className="w-32 text-muted-foreground">Altura da câmera</span>
-          <input type="range" min={0.2} max={0.7} step={0.01} value={top} onChange={(e) => setFrame({ topRatio: Number(e.target.value) }, true)} className="w-full accent-primary" />
+          <span className="w-32 text-muted-foreground">{circle ? 'Tamanho do círculo' : 'Altura da câmera'}</span>
+          <input type="range" min={0.2} max={circle ? 0.8 : 0.7} step={0.01} value={top} onChange={(e) => setFrame({ topRatio: Number(e.target.value) }, true)} className="w-full accent-primary" />
           <b className="w-10 font-mono">{Math.round(top * 100)}%</b>
         </label>
       )}
+      {fr.mode === 'split' && !circle && (
+        <label className="flex items-center gap-2 text-xs">
+          <span className="w-32 text-muted-foreground">Altura do conteúdo</span>
+          <input
+            type="range"
+            min={0.15}
+            max={r2(1 - top)}
+            step={0.01}
+            value={Math.min(1 - top, fr.bottomRatio ?? 1 - top)}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              setFrame({ bottomRatio: v >= 1 - top - 0.005 ? undefined : v }, true);
+            }}
+            className="w-full accent-primary"
+          />
+          <b className="w-10 font-mono">{Math.round(Math.min(1 - top, fr.bottomRatio ?? 1 - top) * 100)}%</b>
+        </label>
+      )}
+      {circle && (
+        <div className="space-y-2 rounded-md border p-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <AlignPad value={fr.alignTop ?? { x: 0.5, y: 0 }} onChange={(alignTop) => setFrame({ alignTop })} center={{ x: 0.5, y: 0 }} tall />
+            <span className="text-muted-foreground">Posição do círculo na tela: arraste o ponto</span>
+          </div>
+          <StyleControls value={fr.styleTop} onChange={(styleTop) => setFrame({ styleTop })} round={false} label="Aro" fallback={{ border: 0.013, color: '#ffffff', radius: 0 }} />
+          {enhancePreview && <EnhanceControls key={`ct${idx}`} value={fr.enhanceTop} onChange={(enhanceTop) => setFrame({ enhanceTop })} box={fr.box} preview={enhancePreview} />}
+        </div>
+      )}
 
-      <div className={cn('grid gap-2', fr.mode === 'split' && 'sm:grid-cols-2')}>
-        <BlockControls
+      <div className={cn('grid gap-2', fr.mode === 'split' && !circle && 'sm:grid-cols-2')}>
+        {!circle && <BlockControls
           title={fr.mode === 'split' ? 'Bloco de cima' : 'Tela'}
           fit={fr.mode === 'split' ? (fr.fitTop ?? 'cover') : fr.fit}
           onFit={(fit) => setFrame(fr.mode === 'split' ? { fitTop: fit } : { fit }, true)}
@@ -665,10 +906,13 @@ export function FramingEditor({
           nowOriginal={() => r2(toOriginal?.(player.now()) ?? 0)}
           camBox={fr.box}
           otherBox={fr.box2}
-        />
+          style={fr.mode === 'split' ? fr.styleTop : undefined}
+          onStyle={fr.mode === 'split' ? (styleTop) => setFrame({ styleTop }) : undefined}
+          enhance={enhancePreview && <EnhanceControls key={`t${idx}`} value={fr.enhanceTop} onChange={(enhanceTop) => setFrame({ enhanceTop })} box={fr.box} preview={enhancePreview} />}
+        />}
         {fr.mode === 'split' && (
           <BlockControls
-            title="Bloco de baixo"
+            title={circle ? 'Conteúdo (tela toda)' : 'Bloco de baixo'}
             fit={fr.fit}
             onFit={(fit) => setFrame({ fit }, true)}
             align={fr.alignBottom}
@@ -678,6 +922,9 @@ export function FramingEditor({
             nowOriginal={() => r2(toOriginal?.(player.now()) ?? 0)}
             camBox={fr.box}
             otherBox={fr.box2}
+            style={circle ? undefined : fr.styleBottom}
+            onStyle={circle ? undefined : (styleBottom) => setFrame({ styleBottom })}
+            enhance={enhancePreview && fr.box2 && <EnhanceControls key={`b${idx}`} value={fr.enhanceBottom} onChange={(enhanceBottom) => setFrame({ enhanceBottom })} box={fr.box2} preview={enhancePreview} />}
           />
         )}
       </div>
@@ -692,7 +939,7 @@ export function FramingEditor({
             <div
               key={which}
               className="absolute cursor-move"
-              style={{ left: `${b.x0 * 100}%`, top: `${b.y0 * 100}%`, width: `${(b.x1 - b.x0) * 100}%`, height: `${(b.y1 - b.y0) * 100}%`, border: `2px solid ${color}`, boxShadow: '0 0 0 9999px rgba(0,0,0,0.35)' }}
+              style={{ left: `${b.x0 * 100}%`, top: `${b.y0 * 100}%`, width: `${(b.x1 - b.x0) * 100}%`, height: `${(b.y1 - b.y0) * 100}%`, border: `2px solid ${color}`, boxShadow: '0 0 0 9999px rgba(0,0,0,0.35)', borderRadius: circle && which === 'box' ? '50%' : undefined }}
               onPointerDown={(e) => onDown(e, which, 'move')}
             >
               <span className="absolute top-0 left-0 rounded-br px-1 text-[10px] font-semibold text-black" style={{ background: color }}>
@@ -728,13 +975,17 @@ const FPS = 30;
  * miniaturas dos frames, zoom (até ver décimos de segundo), cabeça de leitura arrastável, bordas entre
  * enquadramentos arrastáveis e avanço quadro a quadro (botões ou ← → no teclado; Shift = 1 s; espaço = tocar).
  */
-function FrameTimeline({ player, frames, current, onChange }: { player: ClipPlayer; frames: ManualFrame[]; current: number; onChange: (f: ManualFrame[]) => void }) {
+function FrameTimeline({ player, frames, current, onChange, onCut }: { player: ClipPlayer; frames: ManualFrame[]; current: number; onChange: (f: ManualFrame[]) => void; onCut?: (a: number, b: number) => void }) {
   const [zoom, setZoom] = useState(1);
+  // Trecho marcado para apagar (tempo do corte); um lado pode estar marcado sem o outro
+  const [cut, setCut] = useState<{ a: number | null; b: number | null }>({ a: null, b: null });
+  const cutA = cut.a !== null && cut.b !== null ? Math.min(cut.a, cut.b) : null;
+  const cutB = cut.a !== null && cut.b !== null ? Math.max(cut.a, cut.b) : null;
   const scroller = useRef<HTMLDivElement>(null);
   const track = useRef<HTMLDivElement>(null);
   const [trackW, setTrackW] = useState(800);
   const [thumbs, setThumbs] = useState<string[]>([]);
-  const drag = useRef<{ kind: 'seek' } | { kind: 'edge'; i: number } | null>(null);
+  const drag = useRef<{ kind: 'seek' } | { kind: 'edge'; i: number } | { kind: 'select'; from: number } | null>(null);
   const total = Math.max(0.1, player.total);
 
   useEffect(() => {
@@ -850,14 +1101,23 @@ function FrameTimeline({ player, frames, current, onChange }: { player: ClipPlay
           style={{ width: `${100 * zoom}%` }}
           onPointerDown={(e) => {
             (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-            drag.current = { kind: 'seek' };
-            player.seek(timeAt(e.clientX));
+            const t = timeAt(e.clientX);
+            // Shift + arrastar marca o trecho a apagar
+            if (e.shiftKey && onCut) {
+              drag.current = { kind: 'select', from: r2(t) };
+              setCut({ a: r2(t), b: r2(t) });
+            } else drag.current = { kind: 'seek' };
+            player.seek(t);
           }}
           onPointerMove={(e) => {
             const d = drag.current;
             if (!d) return;
             if (d.kind === 'seek') player.seek(timeAt(e.clientX));
-            else moveEdge(d.i, timeAt(e.clientX));
+            else if (d.kind === 'select') {
+              const t = timeAt(e.clientX);
+              setCut({ a: d.from, b: r2(t) });
+              player.seek(t);
+            } else moveEdge(d.i, timeAt(e.clientX));
           }}
           onPointerUp={() => (drag.current = null)}
           onPointerCancel={() => (drag.current = null)}
@@ -909,13 +1169,59 @@ function FrameTimeline({ player, frames, current, onChange }: { player: ClipPlay
               <div className="mx-auto h-full w-1 rounded bg-yellow-400 shadow" />
             </div>
           ))}
+          {/* Trecho marcado para apagar (e as marcas soltas de início/fim) */}
+          {cutA !== null && cutB !== null && cutB > cutA && (
+            <div
+              className="pointer-events-none absolute top-5 bottom-0 z-10 border-x-2 border-red-500 bg-red-500/30"
+              style={{ left: pct(cutA), width: pct(cutB - cutA), backgroundImage: 'repeating-linear-gradient(45deg, transparent 0 6px, rgba(239,68,68,.45) 6px 12px)' }}
+            />
+          )}
+          {(cutA === null || cutB === null) &&
+            [cut.a, cut.b].map((m, k) => (m === null ? null : <div key={k} className="pointer-events-none absolute top-5 bottom-0 z-10 w-0.5 bg-red-500" style={{ left: pct(m) }} />))}
           {/* Cabeça de leitura */}
           <div className="pointer-events-none absolute top-0 bottom-0 z-20 w-0.5 bg-red-500" style={{ left: pct(player.t) }}>
             <div className="-ml-1.5 size-3.5 rounded-sm bg-red-500" />
           </div>
         </div>
       </div>
+      {onCut && (
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+          <span className="text-muted-foreground">Apagar um trecho:</span>
+          <Button size="sm" variant="outline" className="h-7 px-2" title="Marca aqui o começo do trecho a apagar" onClick={() => setCut((c) => ({ ...c, a: r2(player.now()) }))}>
+            [ Início aqui
+          </Button>
+          <Button size="sm" variant="outline" className="h-7 px-2" title="Marca aqui o fim do trecho a apagar" onClick={() => setCut((c) => ({ ...c, b: r2(player.now()) }))}>
+            Fim aqui ]
+          </Button>
+          {cutA !== null && cutB !== null && cutB - cutA >= 0.1 && (
+            <>
+              <span className="font-mono">
+                {cutA.toFixed(2)}s → {cutB.toFixed(2)}s ({(cutB - cutA).toFixed(2)}s)
+              </span>
+              <Button
+                size="sm"
+                variant="destructive"
+                className="h-7 px-2"
+                disabled={player.total - (cutB - cutA) < 1}
+                onClick={() => {
+                  onCut(cutA, cutB);
+                  setCut({ a: null, b: null });
+                  player.seek(cutA);
+                }}
+              >
+                <Scissors className="size-3.5" /> Apagar trecho
+              </Button>
+            </>
+          )}
+          {(cut.a !== null || cut.b !== null) && (
+            <Button size="sm" variant="ghost" className="h-7 px-2 text-muted-foreground" onClick={() => setCut({ a: null, b: null })}>
+              Limpar
+            </Button>
+          )}
+        </div>
+      )}
       <p className="text-[11px] text-muted-foreground">
+        {onCut && <>Shift + arrastar na linha marca um trecho para apagar · </>}
         Clique ou arraste na linha para ir a um instante · ← → um quadro, Shift+← → um segundo, espaço toca/pausa · arraste as barras amarelas para mudar onde o enquadramento troca · aumente o zoom para
         enxergar quadro a quadro.
       </p>
@@ -947,17 +1253,114 @@ function loadPickList(): Promise<PickList> {
   return pickCache;
 }
 
-const ALIGNS = [0, 0.5, 1];
-
-/** 3x3: onde o conteúdo fica dentro do bloco (esquerda/centro/direita x topo/meio/base). */
-function AlignGrid({ value, onChange }: { value?: { x: number; y: number }; onChange: (a: { x: number; y: number }) => void }) {
-  const v = value ?? MID;
+/**
+ * Onde o conteúdo fica dentro do bloco: arraste o ponto (0 = esquerda/topo, 1 = direita/base). Começa no meio;
+ * "Centralizar" (ou duplo clique) volta para o ponto inicial.
+ */
+export function AlignPad({ value, onChange, center = MID, tall = false }: { value?: { x: number; y: number }; onChange: (a: { x: number; y: number }) => void; center?: { x: number; y: number }; tall?: boolean }) {
+  const v = value ?? center;
+  const pad = useRef<HTMLDivElement>(null);
+  const at = (e: React.PointerEvent) => {
+    const r = pad.current!.getBoundingClientRect();
+    onChange({ x: r2(clamp((e.clientX - r.left) / r.width, 0, 1)), y: r2(clamp((e.clientY - r.top) / r.height, 0, 1)) });
+  };
   return (
-    <div className="grid w-fit grid-cols-3 gap-0.5 rounded-md border p-0.5" title="Posição do conteúdo dentro do bloco">
-      {ALIGNS.flatMap((y) =>
-        ALIGNS.map((x) => (
-          <button type="button" key={`${x}-${y}`} onClick={() => onChange({ x, y })} className={cn('size-4 rounded-sm transition-colors', v.x === x && v.y === y ? 'bg-primary' : 'bg-muted hover:bg-muted-foreground/40')} />
-        )),
+    <div className="flex items-center gap-1.5">
+      <div
+        ref={pad}
+        className={cn('relative shrink-0 cursor-crosshair touch-none rounded-md border bg-muted/40', tall ? 'h-16 w-9' : 'h-9 w-16')}
+        title="Arraste para posicionar o conteúdo no bloco (duplo clique centraliza)"
+        onPointerDown={(e) => {
+          (e.target as HTMLElement).setPointerCapture(e.pointerId);
+          at(e);
+        }}
+        onPointerMove={(e) => e.buttons && at(e)}
+        onDoubleClick={() => onChange(center)}
+      >
+        <div className="pointer-events-none absolute inset-x-0 top-1/2 h-px bg-foreground/15" />
+        <div className="pointer-events-none absolute inset-y-0 left-1/2 w-px bg-foreground/15" />
+        <div className="pointer-events-none absolute size-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-background bg-primary shadow" style={{ left: `${v.x * 100}%`, top: `${v.y * 100}%` }} />
+      </div>
+      <button type="button" className="rounded border px-1.5 py-0.5 hover:bg-muted" onClick={() => onChange(center)}>
+        Centralizar
+      </button>
+    </div>
+  );
+}
+
+export type EnhancePreviewFn = (box: FrameBox) => Promise<EnhanceShot>;
+
+/**
+ * "Melhorar qualidade" (IA local, grátis) de uma área: compara num quadro do momento atual o original, "só aumentar"
+ * e "aumentar + restaurar rostos" no tamanho que o render usa, e escolhe qual vai no vídeo final.
+ */
+function EnhanceControls({ value, onChange, box, preview }: { value?: UpscaleModel | null; onChange: (m: UpscaleModel | null) => void; box: FrameBox; preview: EnhancePreviewFn }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [shot, setShot] = useState<EnhanceShot | null>(null);
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setShot(await preview(box));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="space-y-2 rounded-md border border-primary/30 bg-primary/5 p-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <b className="flex items-center gap-1">
+          <Sparkles className="size-3.5 text-primary" /> Melhorar qualidade (IA local, grátis)
+        </b>
+        <button type="button" className="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 hover:bg-muted disabled:opacity-50" disabled={busy} onClick={run}>
+          {busy ? <Loader2 className="size-3 animate-spin" /> : <Sparkles className="size-3" />} {busy ? 'Gerando as 4 versões… (até 1 min)' : 'Comparar versões neste momento'}
+        </button>
+        {value && (
+          <span className="flex items-center gap-1 font-medium text-primary">
+            <Check className="size-3.5" /> no vídeo final: {upscaleModelLabel(value)}
+          </span>
+        )}
+      </div>
+      {error && <p className="text-destructive">{error}</p>}
+      {shot && <EnhanceCompare shot={shot} value={value ?? null} onPick={onChange} />}
+      <div className="flex flex-wrap items-center gap-2">
+        <select className="h-7 rounded-md border bg-background px-1" value={value ?? ''} onChange={(e) => onChange((e.target.value || null) as UpscaleModel | null)}>
+          <option value="">Não melhorar</option>
+          {UPSCALE_MODELS.map((m) => (
+            <option key={m.value} value={m.value}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+        <span className="text-muted-foreground">
+          Vale para esta área neste enquadramento. O render demora mais: uns {value === 'faces' ? '20' : value === 'detailed' ? '40' : value === 'detailedFaces' ? '50' : value === 'fast' ? '3' : '10'} s por segundo de corte (a GPU melhora quadro a quadro).
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** Borda (espessura e cor) e cantos arredondados da moldura de um bloco (ou o aro do círculo). */
+function StyleControls({ value, onChange, round = true, label = 'Borda', fallback = { border: 0, color: '#ffffff', radius: 0 } }: { value?: BlockStyle | null; onChange: (s: BlockStyle | null) => void; round?: boolean; label?: string; fallback?: BlockStyle }) {
+  const st = value ?? fallback;
+  const set = (patch: Partial<BlockStyle>) => onChange({ ...st, ...patch });
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+      <label className="flex min-w-40 flex-1 items-center gap-1.5">
+        <span className="text-muted-foreground">{label}</span>
+        <input type="range" min={0} max={0.03} step={0.001} value={st.border} onChange={(e) => set({ border: Number(e.target.value) })} className="w-full accent-primary" />
+        <b className="w-9 font-mono">{st.border ? `${Math.round(st.border * 1080)}px` : 'sem'}</b>
+        <input type="color" title={`Cor da ${label.toLowerCase()}`} value={st.color} onChange={(e) => set({ color: e.target.value })} className="h-6 w-8 cursor-pointer rounded border-0 bg-transparent" />
+      </label>
+      {round && (
+        <label className="flex min-w-40 flex-1 items-center gap-1.5">
+          <span className="text-muted-foreground">Cantos</span>
+          <input type="range" min={0} max={0.12} step={0.002} value={st.radius} onChange={(e) => set({ radius: Number(e.target.value) })} className="w-full accent-primary" />
+          <b className="w-9 font-mono">{st.radius ? `${Math.round(st.radius * 1080)}px` : 'retos'}</b>
+        </label>
       )}
     </div>
   );
@@ -988,6 +1391,9 @@ function BlockControls({
   nowOriginal,
   camBox,
   otherBox,
+  style,
+  onStyle,
+  enhance,
 }: {
   title: string;
   fit: 'cover' | 'blur';
@@ -999,6 +1405,11 @@ function BlockControls({
   nowOriginal: () => number;
   camBox: FrameBox;
   otherBox?: FrameBox;
+  /** Moldura do bloco (só no modo "Câmera + conteúdo"). */
+  style?: BlockStyle | null;
+  onStyle?: (s: BlockStyle | null) => void;
+  /** Controles do "Melhorar qualidade" desta área. */
+  enhance?: React.ReactNode;
 }) {
   const [list, setList] = useState<PickList | null>(null);
   useEffect(() => {
@@ -1023,9 +1434,11 @@ function BlockControls({
         <Seg value={fit} options={[['cover', 'Preencher'], ['blur', 'Inteiro']]} onChange={onFit} />
       </div>
       <div className="flex items-center gap-2">
-        <AlignGrid value={align} onChange={onAlign} />
-        <span className="text-muted-foreground">{fit === 'blur' ? 'Posição: mais em cima, no meio ou mais embaixo' : 'Posição (use "Inteiro" para mover o conteúdo; em "Preencher" arraste a caixa)'}</span>
+        <AlignPad value={align} onChange={onAlign} />
+        <span className="text-muted-foreground">{fit === 'blur' ? 'Posição: arraste o ponto para o lugar exato' : 'Posição (use "Inteiro" para mover o conteúdo; em "Preencher" arraste a caixa)'}</span>
       </div>
+      {onStyle && <StyleControls value={style} onChange={onStyle} />}
+      {enhance}
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-muted-foreground">Ao lado:</span>
         <Seg
@@ -1095,7 +1508,7 @@ function BlockControls({
               ]}
               onChange={(v) => set({ fit: v })}
             />
-            <AlignGrid value={side.align} onChange={(a) => set({ align: a })} />
+            <AlignPad value={side.align} onChange={(a) => set({ align: a })} />
           </div>
           <label className="flex items-center gap-2">
             <span className="w-14 text-muted-foreground">Largura</span>

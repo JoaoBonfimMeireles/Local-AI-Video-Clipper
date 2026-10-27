@@ -57,3 +57,13 @@ export function resolvePythonBinary(): string {
 export function pythonScriptPath(script: string): string {
   return path.join(getRepoRoot(), 'packages', 'ai-providers', 'python', script);
 }
+
+/** Real-ESRGAN (realesrgan-ncnn-vulkan): REALESRGAN_PATH ou tools/realesrgan/ do projeto. Os modelos ficam em models/ ao lado. */
+export function resolveRealesrgan(): { exe: string; models: string } {
+  const fromEnv = getEnvValue('REALESRGAN_PATH');
+  const exePath = fromEnv && fs.existsSync(fromEnv) ? fromEnv : path.join(getRepoRoot(), 'tools', 'realesrgan', exe('realesrgan-ncnn-vulkan'));
+  if (!fs.existsSync(exePath)) {
+    throw new Error('Real-ESRGAN não encontrado. Baixe realesrgan-ncnn-vulkan (github.com/xinntao/Real-ESRGAN/releases) e extraia em tools/realesrgan, ou defina REALESRGAN_PATH.');
+  }
+  return { exe: exePath, models: path.join(path.dirname(exePath), 'models') };
+}

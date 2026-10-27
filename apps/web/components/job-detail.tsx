@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft, Ban, Check, CheckCircle2, Circle, CircleDot, Clapperboard, Copy, Download, PenLine, FileJson, FileText, FolderOpen, Loader2, RotateCcw, SlidersHorizontal, Star, XCircle } from 'lucide-react';
-import { formatTimestamp, PIPELINE_STEPS, type Clip, type Job, type JobLog } from '@clipper/shared';
+import { formatTimestamp, PIPELINE_STEPS, type AiUsageTotals, type Clip, type Job, type JobAiUsage, type JobLog } from '@clipper/shared';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -10,8 +10,10 @@ import { Progress } from '@/components/ui/progress';
 import { JobStatusBadge, stepLabel } from '@/components/job-status';
 import { ManualEditor } from '@/components/manual-editor';
 import { AssetRequests } from '@/components/asset-requests';
+import { AiUsageLine, AiUsageTotal, formatTokens, tokensText } from '@/components/ai-usage';
 import { api, fileUrl } from '@/lib/client';
 import { cn } from '@/lib/utils';
+import { SpeedPicker } from '@/components/speed-picker';
 
 /** Último ajuste pedido em um corte (job de ajuste separado, mostrado só no card do corte). */
 export interface RevisionStatus {
@@ -23,6 +25,8 @@ export interface RevisionStatus {
   error: string | null;
   finishedAt: string | null;
   createdAt: string;
+  /** Tokens que o ajuste gastou (null se não usou IA). */
+  aiUsage?: AiUsageTotals | null;
 }
 
 interface DetailResponse {
@@ -30,6 +34,7 @@ interface DetailResponse {
   clips: Clip[];
   logs: JobLog[];
   revisions: Record<number, RevisionStatus>;
+  aiUsage: JobAiUsage | null;
 }
 
 export const revisionActive = (r?: RevisionStatus) => !!r && (r.status === 'pending' || r.status === 'processing');
@@ -40,6 +45,7 @@ export function JobDetail({ id }: { id: string }) {
   const [logs, setLogs] = useState<JobLog[]>([]);
   const [revisions, setRevisions] = useState<Record<number, RevisionStatus>>({});
   const [error, setError] = useState<string | null>(null);
+  const [aiUsage, setAiUsage] = useState<JobAiUsage | null>(null);
   /** Cortes deste job que estão nos favoritos: índice do corte → id do favorito. */
   const [favorites, setFavorites] = useState<Record<number, { id: string; at: string }>>({});
   const lastLog = useRef(0);
@@ -68,6 +74,7 @@ export function JobDetail({ id }: { id: string }) {
         setJob(r.job);
         setClips(r.clips);
         setRevisions(r.revisions ?? {});
+        setAiUsage(r.aiUsage ?? null);
         if (r.logs.length) {
           lastLog.current = r.logs[r.logs.length - 1].id;
           setLogs((l) => [...l, ...r.logs].slice(-1000));
@@ -105,6 +112,9 @@ export function JobDetail({ id }: { id: string }) {
 
   const currentIdx = PIPELINE_STEPS.findIndex((s) => s.key === job.step);
   const active = job.status === 'processing' || job.status === 'pending';
+  // Uso de IA de etapas que não estão na lista do pipeline (ex.: jobs de memes, limpeza, curiosidades)
+  const otherUsage = aiUsage?.entries.filter((e) => !PIPELINE_STEPS.some((s) => s.key === e.step)) ?? [];
+  const legacyUsage = !aiUsage && job.result?.aiUsage && job.result.aiUsage.calls > 0 ? job.result.aiUsage : null;
 
   return (
     <div className="space-y-6">
@@ -149,29 +159,45 @@ export function JobDetail({ id }: { id: string }) {
                 const running = job.status === 'processing' && i === currentIdx;
                 const failedHere = job.status === 'failed' && i === currentIdx;
                 return (
-                  <li key={s.key} className={cn('flex items-center gap-2 text-sm', !done && !running && !failedHere && 'text-muted-foreground')}>
-                    {failedHere ? (
-                      <XCircle className="size-4 text-destructive" />
-                    ) : running ? (
-                      <CircleDot className="size-4 text-primary" />
-                    ) : done ? (
-                      <CheckCircle2 className="size-4 text-success" />
-                    ) : (
-                      <Circle className="size-4" />
-                    )}
-                    {i + 1}. {s.label}
+                  <li key={s.key} className={cn('text-sm', !done && !running && !failedHere && 'text-muted-foreground')}>
+                    <div className="flex items-center gap-2">
+                      {failedHere ? (
+                        <XCircle className="size-4 text-destructive" />
+                      ) : running ? (
+                        <CircleDot className="size-4 text-primary" />
+                      ) : done ? (
+                        <CheckCircle2 className="size-4 text-success" />
+                      ) : (
+                        <Circle className="size-4" />
+                      )}
+                      {i + 1}. {s.label}
+                    </div>
+                    {aiUsage?.entries
+                      .filter((e) => e.step === s.key)
+                      .map((e) => <AiUsageLine key={`${e.provider}/${e.model}`} entry={e} className="ml-6" />)}
                   </li>
                 );
               })}
             </ol>
+            {otherUsage.length > 0 && (
+              <div className="space-y-0.5">
+                {otherUsage.map((e) => (
+                  <AiUsageLine key={`${e.step}/${e.provider}/${e.model}`} entry={e} prefix={e.step ? `IA (${stepLabel(e.step)})` : 'IA'} />
+                ))}
+              </div>
+            )}
             {job.error && <p className="rounded-md bg-destructive/10 p-2 text-xs whitespace-pre-wrap text-destructive">{job.error}</p>}
             <div className="space-y-1 text-xs text-muted-foreground">
               {job.result?.provider && <p>IA: {job.result.provider}</p>}
-              {job.result?.aiUsage && job.result.aiUsage.calls > 0 && (
+              {aiUsage ? (
+                <AiUsageTotal total={aiUsage.total} entries={aiUsage.entries} />
+              ) : legacyUsage ? (
                 <p>
-                  Uso: {job.result.aiUsage.calls} chamada(s), {(job.result.aiUsage.inputTokens + job.result.aiUsage.outputTokens).toLocaleString('pt-BR')} tokens —{' '}
-                  {job.result.aiUsage.free ? 'gratuito' : `≈ US$ ${job.result.aiUsage.costUsd.toFixed(4)}`}
+                  Uso: {legacyUsage.calls} chamada(s), {formatTokens(legacyUsage.inputTokens + legacyUsage.outputTokens)} tokens —{' '}
+                  {legacyUsage.free ? 'gratuito' : `≈ US$ ${legacyUsage.costUsd.toFixed(4)}`}
                 </p>
+              ) : (
+                !active && <p>{job.result?.provider === 'heuristic' ? 'Sem uso de IA (seleção heurística local)' : 'Sem uso de IA registrado neste processo'}</p>
               )}
               {job.result?.language && <p>Idioma detectado: {job.result.language}</p>}
               {job.result?.outputDir && (
@@ -420,6 +446,62 @@ const SUB_LANGS: { code: string; label: string }[] = [
 ];
 
 /** Vídeo com legenda em mandarim + legendas (SRT e SBV) nos 4 idiomas, prontas para subir no YouTube. */
+/** SEO para o YouTube: tags prontas para colar e as 3 capas do teste A/B de miniaturas. */
+export function YoutubeKit({ metadataPath }: { metadataPath: string }) {
+  const [meta, setMeta] = useState<{ tags?: string[]; files?: { thumbnails?: string[] } } | null>(null);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    fetch(fileUrl(metadataPath))
+      .then((r) => (r.ok ? r.json() : null))
+      .then(setMeta)
+      .catch(() => undefined);
+  }, [metadataPath]);
+  const tags = meta?.tags ?? [];
+  const thumbs = meta?.files?.thumbnails ?? [];
+  if (!tags.length && !thumbs.length) return null;
+  const dir = metadataPath.replace(/[^\\/]+$/, '');
+  return (
+    <div className="space-y-2 rounded-md border p-2 text-xs">
+      {tags.length > 0 && (
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <span className="flex-1 font-medium">Tags do YouTube ({tags.join(', ').length}/500)</span>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2"
+              onClick={async () => {
+                await navigator.clipboard.writeText(tags.join(', '));
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              }}
+            >
+              {copied ? <Check /> : <Copy />} {copied ? 'Copiado' : 'Copiar tags'}
+            </Button>
+          </div>
+          <p className="text-muted-foreground">{tags.join(', ')}</p>
+        </div>
+      )}
+      {thumbs.length > 0 && (
+        <div className="space-y-1">
+          <p className="font-medium">Miniaturas para testar e comparar</p>
+          <div className="grid grid-cols-3 gap-1.5">
+            {thumbs.map((t, i) => (
+              <a key={t} href={fileUrl(dir + t, true)} title={`Baixar miniatura ${i + 1}`} className="group relative block overflow-hidden rounded border">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={fileUrl(dir + t)} alt={`Miniatura ${i + 1}`} className="w-full object-cover transition group-hover:opacity-80" />
+                <span className="absolute right-1 bottom-1 rounded bg-black/70 px-1 text-[10px] text-white">
+                  <Download className="inline size-3" /> {i + 1}
+                </span>
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function LanguageDownloads({ metadataPath }: { metadataPath: string }) {
   const [files, setFiles] = useState<{ videoZh?: string | null; subtitles?: Record<string, { srt: string; sbv: string }> } | null>(null);
   useEffect(() => {
@@ -515,7 +597,9 @@ export function ReviseBox({ endpoint, onQueued }: { endpoint: string; onQueued: 
 }
 
 /** Andamento do ajuste no próprio card: carregando, atualizado ou falhou. */
-export function RevisionBanner({ rev }: { rev: RevisionStatus }) {
+export function RevisionBanner({ rev, onRetried }: { rev: RevisionStatus; onRetried?: (rev: RevisionStatus) => void }) {
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
   if (revisionActive(rev))
     return (
       <div className="space-y-1 rounded-md border border-primary/40 bg-primary/10 p-2 text-xs">
@@ -531,6 +615,30 @@ export function RevisionBanner({ rev }: { rev: RevisionStatus }) {
       <div className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
         <p className="font-medium">O ajuste falhou — o vídeo anterior foi mantido.</p>
         {rev.error && <p className="mt-0.5 line-clamp-3 whitespace-pre-wrap">{rev.error}</p>}
+        {onRetried && (
+          // Reenvia o MESMO ajuste (a edição manual ou o pedido ficam guardados no job), sem refazer nada no editor
+          <Button
+            size="sm"
+            variant="outline"
+            className="mt-1.5 h-7 border-destructive/40 px-2 text-destructive hover:bg-destructive/10"
+            disabled={retrying}
+            onClick={async () => {
+              setRetrying(true);
+              setRetryError(null);
+              try {
+                await api(`/api/jobs/${rev.id}/retry`, { method: 'POST' });
+                onRetried({ ...rev, status: 'pending', progress: 0, error: null, finishedAt: null });
+              } catch (e) {
+                setRetryError((e as Error).message);
+              } finally {
+                setRetrying(false);
+              }
+            }}
+          >
+            {retrying ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />} Tentar de novo
+          </Button>
+        )}
+        {retryError && <p className="mt-1">{retryError}</p>}
       </div>
     );
   // Concluído há pouco: destaca que o vídeo acima já é a versão nova
@@ -539,6 +647,7 @@ export function RevisionBanner({ rev }: { rev: RevisionStatus }) {
   return (
     <p className="flex items-center gap-1.5 rounded-md border border-success/40 bg-success/10 p-2 text-xs font-medium text-success">
       <CheckCircle2 className="size-3.5" /> Vídeo atualizado com o ajuste ({new Date(rev.finishedAt!).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })})
+      {rev.aiUsage && <span className="font-normal text-muted-foreground"> · IA: {tokensText(rev.aiUsage)}</span>}
     </p>
   );
 }
@@ -628,9 +737,11 @@ function ClipCard({
         </p>
         {clip.reason && <p className="line-clamp-3 text-xs text-muted-foreground">{clip.reason}</p>}
         {(clip.description || clip.hashtags.length > 0) && <PostText clip={clip} />}
+        {clip.status === 'completed' && clip.outputPath && <SpeedPicker />}
         {clip.status === 'completed' && clip.metadataPath && <ClipAssets key={clip.metadataPath} metadataPath={clip.metadataPath} />}
+        {clip.status === 'completed' && clip.metadataPath && <YoutubeKit key={`y${clip.metadataPath}`} metadataPath={clip.metadataPath} />}
         {clip.status === 'completed' && clip.metadataPath && <LanguageDownloads key={`l${clip.metadataPath}`} metadataPath={clip.metadataPath} />}
-        {revision && <RevisionBanner rev={revision} />}
+        {revision && <RevisionBanner rev={revision} onRetried={onRevise} />}
         {clip.status === 'completed' && !revising && clip.metadataPath && (
           <Button variant="outline" size="sm" className="w-full" onClick={() => setEditing(true)}>
             <SlidersHorizontal /> Editar manualmente

@@ -9,3 +9,4 @@ node_modules/
 data/**
 !data/**/
 !data/**/.gitkeep
+tools/

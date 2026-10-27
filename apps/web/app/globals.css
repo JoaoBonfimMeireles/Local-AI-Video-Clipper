@@ -1,4 +1,6 @@
-@import 'tailwindcss';
+/* Classes só de apps/web: o Next roda da raiz do repositório e, sem isto, o Tailwind varre data/ (o worker cria e
+   apaga pastas lá o tempo todo), recompilando o CSS e recarregando a página sem parar. */
+@import 'tailwindcss' source('..');
 
 /* Tema no padrão shadcn/ui (tokens CSS) — escuro por padrão, claro opcional. */
 :root {

@@ -1,3 +1,5 @@
 # Bibliotecas CUDA 12 exigidas pelo CTranslate2 (faster-whisper) na GPU NVIDIA.
 nvidia-cublas-cu12
 nvidia-cudnn-cu12>=9,<10
+# O setup (--cuda) também troca o onnxruntime pelo onnxruntime-gpu==1.23.2 (CUDA 12; as versões 1.24+ do PyPI
+# já são para CUDA 13), usado para restaurar rostos (GFPGAN) na GPU.

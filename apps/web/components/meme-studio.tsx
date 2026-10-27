@@ -30,8 +30,10 @@ import { Select } from '@/components/ui/select';
 import { Skeleton, SkeletonVideo } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { JobStatusBadge, stepLabel } from '@/components/job-status';
-import { api, fileUrl, uploadFile, usePolling } from '@/lib/client';
+import { api, fileUrl, uploadFile, uploadMemeAsset as uploadAsset, usePolling } from '@/lib/client';
 import { cn } from '@/lib/utils';
+import { SpeedPicker } from '@/components/speed-picker';
+import { getPlaybackSpeed, withSpeed } from '@/lib/playback-speed';
 
 interface Overview {
   /** data/input: os vídeos do compilado guardam só o nome do arquivo. */
@@ -64,23 +66,6 @@ const lastIndexAt = (offsets: number[], t: number) => {
   return i;
 };
 const fmt = (t: number) => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`;
-
-/** Upload de logo/imagem/som para data/meme-studio/assets (XHR, com progresso). */
-function uploadAsset(file: File, onProgress: (p: number) => void): Promise<{ path: string; kind: string }> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('PUT', '/api/memes/assets');
-    xhr.setRequestHeader('x-file-name', encodeURIComponent(file.name));
-    xhr.setRequestHeader('content-type', 'application/octet-stream');
-    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
-    xhr.onload = () => {
-      const body = JSON.parse(xhr.responseText || '{}');
-      xhr.status < 300 ? resolve(body) : reject(new Error(body.error ?? `HTTP ${xhr.status}`));
-    };
-    xhr.onerror = () => reject(new Error('Falha de rede no upload'));
-    xhr.send(file);
-  });
-}
 
 const imageAspect = (src: string) =>
   new Promise<number>((resolve) => {
@@ -450,6 +435,7 @@ function MemeEditor({ initial, projects, onCreate, inputDir, brand: brand0, jobs
             <span className="w-28 text-center font-mono text-xs tabular-nums">
               {fmt(t)} / {fmt(total)}
             </span>
+            <SpeedPicker />
             <Button variant="outline" size="sm" onClick={split} disabled={!p.clips.length} title="Divide o vídeo no ponto do cursor">
               <Scissors /> Dividir aqui
             </Button>
@@ -535,7 +521,7 @@ function Stage({ p, inputDir, brand, zoom, t, setT, playing, setPlaying, sel, se
       if (!c) return setPlaying(false);
       const v = videos.current[c.id];
       if (v && !v.paused && v.readyState >= 2) cur = offsets[i] + (v.currentTime - c.start);
-      else cur += dt;
+      else cur += dt * getPlaybackSpeed();
       if (cur >= offsets[i] + clipLength(c) - 0.01) {
         v?.pause();
         cur = offsets[i] + clipLength(c) + 0.001;
@@ -569,10 +555,10 @@ function Stage({ p, inputDir, brand, zoom, t, setT, playing, setPlaying, sel, se
       for (const s of p.sfx) {
         if (!sfxPlayed.has(s.id) && cur >= s.at && cur < s.at + 0.25) {
           sfxPlayed.add(s.id);
-          const a = new Audio(fileUrl(s.file));
+          const a = withSpeed(new Audio(fileUrl(s.file)));
           a.volume = Math.min(1, s.volume);
           void a.play().catch(() => undefined);
-          setTimeout(() => a.pause(), s.duration * 1000);
+          setTimeout(() => a.pause(), (s.duration * 1000) / getPlaybackSpeed());
         }
       }
       tRef.current = cur;
@@ -1173,6 +1159,7 @@ function RenderPanel({ p, job, stale }: { p: MemeProject; job: Job | null; stale
       {r && (
         <div className="mt-2 space-y-2">
           <video src={fileUrl(r.video)} controls className="mx-auto max-h-64 rounded-lg" />
+          <SpeedPicker className="flex justify-center" />
           <div className="flex flex-wrap gap-1.5">
             <a href={fileUrl(r.video, true)} className="inline-flex items-center gap-1 rounded-md bg-gradient-to-r from-[#5b2a6e] to-[#e07a3a] px-2.5 py-1 text-xs text-white">
               <Download className="size-3.5" /> MP4

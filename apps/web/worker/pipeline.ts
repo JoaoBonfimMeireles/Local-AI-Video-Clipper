@@ -62,6 +62,8 @@ import {
   extractClipFramesFps,
   extractFrames,
   extractThumbnail,
+  renderThumbnails,
+  defaultThumbnailSpecs,
   findEnergyPeaks,
   pickFrameTimes,
   prepareClipSource,
@@ -973,6 +975,16 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         narratedDuration = await addNarrator({ video: `${base}.mp4`, idea: narratedIdea, width: canvas.width, height: canvas.height, app, workDir: path.join(workDir, 'narrador'), signal, log: (l, m) => log(l, m) });
       }
       await extractThumbnail(`${base}.mp4`, `${base}.jpg`, Math.min(1.5, duration / 2)).catch(() => undefined);
+      // 3 capas exageradas para o teste A/B de miniaturas do YouTube
+      const finalDuration = narratedDuration ?? duration;
+      const thumbnails = await renderThumbnails({
+        video: `${base}.mp4`,
+        base,
+        duration: finalDuration,
+        vertical: canvas.height > canvas.width,
+        specs: edit.thumbnails.length ? edit.thumbnails : defaultThumbnailSpecs(finalDuration, edit.coverText || c.title),
+        signal,
+      });
 
       // Mesma edição, legenda em mandarim (chinês simplificado): reaproveita a fonte já preparada do corte
       let videoZh: string | null = null;
@@ -1030,6 +1042,9 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
         variant: c.variant ?? null,
         assetRequests: c.assetRequests?.length ? c.assetRequests : undefined,
         hashtags: edit.hashtags,
+        // SEO do YouTube: tags (campo "Tags" do upload) e textos das 3 capas
+        tags: edit.tags,
+        thumbnailTexts: (edit.thumbnails.length ? edit.thumbnails : []).map((t) => t.text),
         source: { file: path.basename(job.inputPath), start: c.start, end: c.end, segments: c.segments },
         duration: Number((narratedDuration ?? duration + pausedTotal).toFixed(3)),
         // Curiosidades: formato, roteiro narrado e CTA da ideia
@@ -1067,6 +1082,7 @@ export async function runPipeline(job: Job, signal: AbortSignal): Promise<Pipeli
           video: path.basename(`${base}.mp4`),
           videoZh: videoZh ? path.basename(videoZh) : null,
           thumbnail: path.basename(`${base}.jpg`),
+          thumbnails,
           srt: srtFiles,
           // Legendas para subir no YouTube/TikTok: SRT e SBV em português, inglês, espanhol e chinês
           subtitles: subtitleFiles,

@@ -31,7 +31,29 @@ export interface CleanSpec {
   normalizeAudio: boolean;
   /** Gera também, para baixar separado: só a voz, só a música, o vídeo sem som e os trechos cortados. */
   exportStems: boolean;
+  /** Melhorar qualidade (Real-ESRGAN local): altura-alvo do lado menor, 0 = desligado. */
+  upscaleTo?: UpscaleTarget;
+  /**
+   * realistic = realesr-general-x4v3 (vídeo real, torch na GPU); faces = realistic + rostos restaurados (GFPGAN);
+   * fast = realesr-animevideov3 (desenho/anime); detailed = realesrgan-x4plus (mais detalhe, bem mais lento).
+   */
+  upscaleModel?: UpscaleModel;
 }
+
+export type UpscaleTarget = 0 | 480 | 720 | 1080;
+/** detailedFaces = detailed + rostos restaurados (GFPGAN). */
+export const UPSCALE_MODEL_IDS = ['realistic', 'faces', 'detailed', 'detailedFaces', 'fast'] as const;
+export type UpscaleModel = (typeof UPSCALE_MODEL_IDS)[number];
+
+/** Nome de cada modelo na interface (ordem = recomendação). */
+export const UPSCALE_MODELS: { value: UpscaleModel; label: string; hint: string }[] = [
+  { value: 'realistic', label: 'Só aumentar (realista)', hint: 'Real-ESRGAN para vídeo real' },
+  { value: 'faces', label: 'Aumentar + restaurar rostos', hint: 'reconstrói olhos, boca e pele (GFPGAN)' },
+  { value: 'detailed', label: 'Detalhado (mais nítido, mais lento)', hint: 'Real-ESRGAN x4plus' },
+  { value: 'detailedFaces', label: 'Detalhado + restaurar rostos', hint: 'x4plus + GFPGAN: o mais caprichado (o mais lento)' },
+  { value: 'fast', label: 'Rápido (desenho/anime)', hint: 'deixa rostos com cara de pintura' },
+];
+export const upscaleModelLabel = (m: UpscaleModel) => UPSCALE_MODELS.find((x) => x.value === m)?.label ?? m;
 
 /** Arquivos extras de "Separar em faixas" (caminhos absolutos). */
 export interface CleanStems {
@@ -53,6 +75,8 @@ export const DEFAULT_CLEAN_SPEC: Omit<CleanSpec, 'file'> = {
   denoise: false,
   normalizeAudio: true,
   exportStems: false,
+  upscaleTo: 0,
+  upscaleModel: 'realistic',
 };
 
 /** Trechos mantidos: [0, duração] menos os cortes (unidos e ordenados). */

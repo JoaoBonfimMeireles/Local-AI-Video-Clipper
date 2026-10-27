@@ -33,10 +33,11 @@ import {
   updateFavorite,
   updateJobProgress,
 } from '@clipper/shared/server';
-import { analyzeAssets, buildAss, buildSrt, canvasSize, captionCues, extractThumbnail, planSoundPauses, prepareClipSource, probe, renderClip, shiftForPauses, splitTopRatio } from '@clipper/video-processing';
-import { rankCardsFor } from './pipeline';
+import { analyzeAssets, buildAss, buildSrt, canvasSize, captionCues, defaultThumbnailSpecs, extractThumbnail, planSoundPauses, prepareClipSource, probe, renderClip, renderThumbnails, shiftForPauses, splitTopRatio } from '@clipper/video-processing';
+import { rankCardsFor, transcriptCachePath } from './pipeline';
 import { translateCaptions, writeCaptionFiles } from './captions';
 import { cachedStyleGuide, combineGuidelines } from './references';
+import { enhanceManualFrames } from './enhance';
 
 interface RenderContext {
   input: string;
@@ -68,9 +69,21 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
   const ctx = meta.renderContext as RenderContext;
   if (!ctx) throw new Error('Este corte foi gerado por uma versão antiga do app (sem contexto de renderização). Reprocesse o vídeo uma vez para poder ajustar.');
   if (!fs.existsSync(ctx.input)) throw new Error(`O vídeo original não está mais em ${ctx.input}; sem ele não dá para refazer o corte.`);
-  const transcript: Transcript = JSON.parse(fs.readFileSync(fav ? path.join(fav.dir, 'transcript.json') : path.join(parent!.result!.outputDir!, 'transcript.json'), 'utf8'));
-  const s = { ...job.settings, revision: null };
   const app = getAppSettings();
+  // O transcript.json só vai para a pasta de saída na exportação: se o job original não terminou (cancelado,
+  // falhou, ainda renderizando), usa o da pasta temporária dele ou o cache global da transcrição
+  const transcriptFile = (
+    fav
+      ? [path.join(fav.dir, 'transcript.json')]
+      : [
+          path.join(parent!.result!.outputDir!, 'transcript.json'),
+          path.join(dataPaths.temp, parent!.id, 'transcript.json'),
+          transcriptCachePath(parent!.inputPath, app.whisperModel, parent!.settings.sourceLanguage),
+        ]
+  ).find((f) => fs.existsSync(f));
+  if (!transcriptFile) throw new Error('Transcrição do vídeo original não encontrada; reprocesse o vídeo uma vez para poder ajustar.');
+  const transcript: Transcript = JSON.parse(fs.readFileSync(transcriptFile, 'utf8'));
+  const s = { ...job.settings, revision: null };
   const n = String(rev.clipIndex + 1).padStart(3, '0');
   const manual = rev.manual ?? null;
   log('info', manual ? `Edição manual do corte ${rev.clipIndex + 1} ("${meta.title}") — sem IA no plano` : `Ajustando o corte ${rev.clipIndex + 1} ("${meta.title}") — pedido: ${rev.comment.slice(0, 200)}`);
@@ -193,6 +206,23 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
     start = 0;
     await prepareClipSource({ input: ctx.input, segments, source: info, subtitleRegion: ctx.inpaintRegion, output: input, workDir, signal, onProgress: (p) => progress(0.35 + p * 0.3, 'render') });
   }
+  // Enquadramento desenhado no editor manual (substitui o da IA); áreas com "Melhorar qualidade" passam pelo Real-ESRGAN antes
+  let manualFrames = withSceneFiles((manual ? manual.frames : meta.edit?.frames)?.length ? (manual ? manual.frames : meta.edit.frames) : null, ctx.input);
+  if (manualFrames?.some((f) => f.enhanceTop || f.enhanceBottom)) {
+    log('info', 'Melhorando a qualidade das áreas marcadas (Real-ESRGAN na GPU)…');
+    const src = input === ctx.input ? info : await probe(input, signal);
+    manualFrames = await enhanceManualFrames({
+      frames: manualFrames,
+      input,
+      start,
+      duration,
+      source: src,
+      workDir,
+      signal,
+      log,
+      onProgress: (p) => progress(0.4 + p * 0.1, 'render'),
+    });
+  }
   const renderArgs: Parameters<typeof renderClip>[0] = {
     input,
     start,
@@ -206,9 +236,12 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
     content: layout?.content ?? null,
     bubble: layout?.bubble ?? null,
     contentPhases: layout?.contentPhases ?? null,
-    // Enquadramento desenhado no editor manual (substitui o da IA)
-    manualFrames: withSceneFiles((manual ? manual.frames : meta.edit?.frames)?.length ? (manual ? manual.frames : meta.edit.frames) : null, ctx.input),
+    manualFrames,
     zooms: resolved.zooms,
+    // Texto, logo e fundo de cor do editor manual (num ajuste por comentário, ficam os da última edição)
+    texts: (manual ? manual.texts : meta.edit?.texts) ?? null,
+    logo: (manual ? manual.logo : meta.edit?.logo) ?? null,
+    fillColor: (manual ? manual.background : meta.edit?.background) ?? null,
     overlays: resolved.overlays.map((o) => {
       const inf = memeInfo.get(o.file);
       const dur = inf && inf.duration > 0 ? Math.min(Math.max(o.duration, Math.min(inf.duration, 6)), inf.duration) : o.duration;
@@ -227,6 +260,12 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
   };
   await renderClip(renderArgs);
   await extractThumbnail(`${base}.mp4`, `${base}.jpg`, Math.min(1.5, duration / 2)).catch(() => undefined);
+  const thumbSpecs = resolved.thumbnails.length
+    ? resolved.thumbnails
+    : (meta.thumbnailTexts as string[] | undefined)?.length
+      ? (meta.thumbnailTexts as string[]).map((text, i) => ({ text, at: duration * [0.2, 0.5, 0.8][i % 3] }))
+      : defaultThumbnailSpecs(duration, resolved.coverText || resolved.title || meta.title);
+  const thumbnails = await renderThumbnails({ video: `${base}.mp4`, base, duration, vertical: canvas.height > canvas.width, specs: thumbSpecs, signal });
 
   // Legendas em 4 idiomas + versão com legenda em mandarim (igual ao corte principal)
   const cards = ctx.category === 'top5' ? rankCardsFor(segments) : undefined;
@@ -271,6 +310,8 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
     title,
     description: resolved.description ?? meta.description,
     hashtags: resolved.hashtags.length ? resolved.hashtags : meta.hashtags,
+    tags: resolved.tags.length ? resolved.tags : (meta.tags ?? []),
+    thumbnailTexts: thumbSpecs.map((t) => t.text),
     duration: Number((duration + pausedTotal).toFixed(3)),
     source: { ...meta.source, start: Math.min(...segments.map((x) => x.start)), end: Math.max(...segments.map((x) => x.end)), segments },
     // Pausas inseridas para os sons (tempo do plano, sem pausas): o editor manual converte para o tempo do vídeo
@@ -282,6 +323,9 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
       sfx: resolved.sfx.map((x) => ({ ...x, file: x.fileName })),
       emphasisWords: resolved.emphasisWords,
       frames: (manual ? manual.frames : meta.edit?.frames)?.length ? (manual ? manual.frames : meta.edit.frames) : null,
+      texts: renderArgs.texts,
+      logo: renderArgs.logo,
+      background: renderArgs.fillColor,
     },
     renderContext: { ...ctx, segments },
     revision: { version, comment: manual ? 'Edição manual' : rev.comment, changes, previous: path.basename((fav ? fav.videoPath : clip?.outputPath) ?? '') },
@@ -289,6 +333,7 @@ export async function runRevision(job: Job, signal: AbortSignal): Promise<{ rend
       video: path.basename(`${base}.mp4`),
       videoZh: videoZh ? path.basename(videoZh) : null,
       thumbnail: path.basename(`${base}.jpg`),
+      thumbnails,
       srt: srtPath ? { [transcript.language]: path.basename(srtPath) } : {},
       subtitles: subtitleFiles,
     },

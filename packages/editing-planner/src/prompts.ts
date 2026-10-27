@@ -402,11 +402,22 @@ Retorne JSON exatamente neste formato:
      : ''
  }
  "emphasisWords":["palavra","chave"],
- "title":"título final do post (MENOS de 50 caracteres, altamente clicável, gancho forte)",
+ "title":"título SEO (MENOS de 60 caracteres): palavra-chave principal no começo + gancho forte, altamente clicável",
  "coverText":"texto curto para a capa do Short (3-6 palavras, impacto)",
- "description":"legenda do post: 1-3 frases que geram curiosidade + chamada para ação",
+ "thumbnails":[{"at":3.2,"text":"ELE NÃO ESPERAVA!"},{"at":9.8,"text":"O FIM É INSANO"},{"at":1.0,"text":"NINGUÉM ACREDITOU"}],
+ "description":"descrição SEO (ver regras abaixo)",
+ "tags":["palavra-chave principal","variação long tail","nome da pessoa","tema amplo"],
  "hashtags":["#tema","#nicho"]}]}
-Escreva title, description e hashtags no idioma "${args.language}". Use de 5 a 10 hashtags relevantes ao conteúdo (misture amplas e de nicho).
+Escreva title, description, tags, thumbnails e hashtags no idioma "${args.language}".
+SEO (YouTube, Google e buscas por IA):
+- title: comece pela palavra-chave que alguém digitaria para achar este momento (nome da pessoa/jogo/assunto), depois o gancho. Sem clickbait falso.
+- description: 1ª linha (até ~120 caracteres, aparece na busca) resume o que acontece usando a palavra-chave principal;
+  depois um parágrafo de 2-4 frases claras e factuais (quem, o quê, onde, por que importa), com sinônimos e termos relacionados,
+  para buscadores e IAs entenderem o vídeo; depois uma chamada para ação (comentar/inscrever-se); por fim 3 hashtags principais.
+- tags: 12 a 20 tags SEM #: palavra-chave exata, variações long tail, nomes próprios, erros de digitação comuns, tema amplo, nicho. Até 480 caracteres no total.
+- thumbnails: EXATAMENTE 3 capas diferentes para teste A/B: cada uma num momento visualmente forte (rosto com expressão, ação) dentro da duração do corte,
+  com texto EXAGERADO e chamativo em MAIÚSCULAS (2-5 palavras), ângulos diferentes (choque, curiosidade, emoção). Não repita o título.
+- hashtags: de 5 a 10 relevantes ao conteúdo (misture amplas e de nicho).
 Regras: "at" + "duration" dentro da duração do corte; overlays só com MEMES (type "meme", sem imagens estáticas);
 sfx podem ter "duration" (quanto do som tocar, padrão 5s);
 sfx usa categorias de audio; position ∈ center|top|bottom|top-left|top-right; não cubra o rosto/centro com memes por muito tempo.`;
@@ -451,11 +462,11 @@ ${args.catalog}
 
 Retorne o plano COMPLETO revisado neste formato (mesmo do plano atual):
 {"segments":null,"shots":[...],"zooms":[...],"overlays":[{"type":"meme","file":"m3","at":4.2,"duration":2,"position":"center","scale":0.7,"audioMode":"both","reason":"..."}],
- "sfx":[{"file":"s2","at":4.2,"volume":0.8,"reason":"..."}],"emphasisWords":[...],"title":"...","description":"...","hashtags":[...],
+ "sfx":[{"file":"s2","at":4.2,"volume":0.8,"reason":"..."}],"emphasisWords":[...],"title":"...","description":"...","tags":[...],"thumbnails":[...],"hashtags":[...],
  "changes":"o que você mudou"}
 Regras: só preencha "segments" (tempos ABSOLUTOS do vídeo original) se o pedido mudar começo, fim ou trechos do corte
 (ex.: "começa 5s antes" → start do primeiro trecho - 5); senão use null. Se mudar os trechos, ajuste os tempos dos
-memes/sons para a nova linha do tempo. Textos (title/description/hashtags) no idioma "${args.language}".`;
+memes/sons para a nova linha do tempo. Textos (title/description/tags/thumbnails/hashtags, com foco em SEO) no idioma "${args.language}".`;
 }
 
 export const REFERENCE_SYSTEM = `Você é um editor de clipes virais estudando um corte de sucesso para copiar a FÓRMULA (não o

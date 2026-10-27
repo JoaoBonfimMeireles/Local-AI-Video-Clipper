@@ -7,6 +7,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { fileUrl } from '@/lib/client';
 import { cn } from '@/lib/utils';
+import { SpeedPicker } from '@/components/speed-picker';
 
 type Tool = 'cam-rect' | 'cam-circle' | 'content' | null;
 
@@ -113,6 +114,7 @@ export function RegionSelector({
     <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
       <div>
         <Label>Painel do vídeo (opcional)</Label>
+        <SpeedPicker className="float-right" />
         <p className="mt-1 text-xs text-muted-foreground">
           Assista, marque o trecho em que a IA deve procurar os cortes e, em reacts, desenhe a câmera do streamer e a área do vídeo a que ele reage.
         </p>

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { z } from 'zod';
-import { DEFAULT_JOB_SETTINGS } from '@clipper/shared';
+import { DEFAULT_JOB_SETTINGS, UPSCALE_MODEL_IDS } from '@clipper/shared';
 import { createJob, dataPaths, deleteJob, getJob, isInside, listJobs, safeJoin } from '@clipper/shared/server';
 import { badRequest } from '@/lib/validation';
 
@@ -21,6 +21,8 @@ const schema = z.object({
   denoise: z.boolean(),
   normalizeAudio: z.boolean(),
   exportStems: z.boolean().default(false),
+  upscaleTo: z.union([z.literal(0), z.literal(480), z.literal(720), z.literal(1080)]).default(0),
+  upscaleModel: z.enum(UPSCALE_MODEL_IDS).default('realistic'),
 });
 
 /** Limpezas recentes (jobs com settings.clean). */

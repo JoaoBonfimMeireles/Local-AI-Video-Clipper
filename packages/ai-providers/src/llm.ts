@@ -24,6 +24,49 @@ export interface LLMUsage {
   outputTokens: number;
 }
 
+/** Uma chamada concluída: o worker grava no banco, por job e etapa. */
+export interface LLMUsageEvent {
+  provider: string;
+  model: string;
+  /** Entrada total, incluindo o que veio do cache. */
+  inputTokens: number;
+  cacheReadTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  free: boolean;
+  /** false quando o provedor não devolveu a contagem de tokens. */
+  measured: boolean;
+}
+
+/** O worker roda um job por vez: um ouvinte global basta para atribuir cada chamada ao job atual. */
+let usageListener: ((e: LLMUsageEvent) => void) | null = null;
+export function setLLMUsageListener(fn: ((e: LLMUsageEvent) => void) | null): void {
+  usageListener = fn;
+}
+
+function reportUsage(p: LLMProvider, u: { inputTokens: number; cacheReadTokens?: number; outputTokens: number; model?: string; costUsd?: number }): void {
+  p.usage.calls++;
+  p.usage.inputTokens += u.inputTokens;
+  p.usage.outputTokens += u.outputTokens;
+  if (!usageListener) return;
+  const model = u.model || p.model;
+  const one = { calls: 1, inputTokens: u.inputTokens, outputTokens: u.outputTokens };
+  try {
+    usageListener({
+      provider: p.name,
+      model,
+      inputTokens: u.inputTokens,
+      cacheReadTokens: u.cacheReadTokens ?? 0,
+      outputTokens: u.outputTokens,
+      costUsd: u.costUsd ?? estimateCostUsd(model, one),
+      free: p.free,
+      measured: u.inputTokens + u.outputTokens > 0,
+    });
+  } catch {
+    /* registrar uso nunca derruba a chamada */
+  }
+}
+
 export interface LLMProvider {
   name: string;
   model: string;
@@ -145,9 +188,11 @@ class GeminiProvider implements LLMProvider {
       try {
         const json = await postJson(urlFor(), body, { 'x-goog-api-key': this.apiKey }, req.signal);
         const um = json.usageMetadata ?? {};
-        this.usage.calls++;
-        this.usage.inputTokens += um.promptTokenCount ?? 0;
-        this.usage.outputTokens += (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0);
+        reportUsage(this, {
+          inputTokens: um.promptTokenCount ?? 0,
+          cacheReadTokens: um.cachedContentTokenCount ?? 0,
+          outputTokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+        });
         const cand = json.candidates?.[0];
         const text = cand?.content?.parts?.filter((p: any) => !p.thought).map((p: any) => p.text ?? '').join('') ?? '';
         if (!text) throw new Error(`Gemini sem resposta (${cand?.finishReason ?? json.promptFeedback?.blockReason ?? 'desconhecido'})`);
@@ -276,11 +321,16 @@ class AnthropicProvider implements LLMProvider {
     let stop = '';
     let refusal = '';
     let inTok = 0;
+    let cacheTok = 0;
     let outTok = 0;
+    let model = '';
     const handle = (ev: any) => {
       switch (ev.type) {
         case 'message_start':
-          inTok += (ev.message?.usage?.input_tokens ?? 0) + (ev.message?.usage?.cache_read_input_tokens ?? 0);
+          cacheTok += ev.message?.usage?.cache_read_input_tokens ?? 0;
+          inTok += (ev.message?.usage?.input_tokens ?? 0) + (ev.message?.usage?.cache_read_input_tokens ?? 0) + (ev.message?.usage?.cache_creation_input_tokens ?? 0);
+          // Com fallback no servidor, quem respondeu pode ser outro modelo
+          model = ev.message?.model ?? model;
           break;
         case 'content_block_delta':
           if (ev.delta?.type === 'text_delta') text += ev.delta.text;
@@ -305,9 +355,7 @@ class AnthropicProvider implements LLMProvider {
         if (line.startsWith('data:')) handle(JSON.parse(line.slice(5)));
       }
     }
-    this.usage.calls++;
-    this.usage.inputTokens += inTok;
-    this.usage.outputTokens += outTok;
+    reportUsage(this, { inputTokens: inTok, cacheReadTokens: cacheTok, outputTokens: outTok, model });
     if (stop === 'refusal') throw new Error(`Claude recusou o pedido${refusal ? ` (${refusal})` : ''}`);
     if (stop === 'max_tokens' && !text.trim().endsWith('}')) throw new Error('Resposta do Claude cortada (limite de tokens)');
     if (!text) throw new Error('Claude sem resposta');
@@ -343,9 +391,7 @@ class OllamaProvider implements LLMProvider {
       {},
       req.signal,
     );
-    this.usage.calls++;
-    this.usage.inputTokens += json.prompt_eval_count ?? 0;
-    this.usage.outputTokens += json.eval_count ?? 0;
+    reportUsage(this, { inputTokens: json.prompt_eval_count ?? 0, outputTokens: json.eval_count ?? 0, costUsd: 0 });
     const text = json.message?.content ?? '';
     if (!text) throw new Error('Ollama sem resposta');
     return text;
@@ -459,9 +505,17 @@ class ClaudeCodeProvider implements LLMProvider {
         throw new Error(`Claude Code falhou (código ${res.code}): ${(text || res.stderrTail || res.stdout).slice(0, 400)}`);
       }
       const u = json.usage ?? {};
-      this.usage.calls++;
-      this.usage.inputTokens += (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-      this.usage.outputTokens += u.output_tokens ?? 0;
+      // modelUsage traz o id real do modelo (o "sonnet" do argumento é só um apelido)
+      const models = Object.entries((json.modelUsage ?? {}) as Record<string, { outputTokens?: number }>);
+      const realModel = models.sort((a, b) => (b[1]?.outputTokens ?? 0) - (a[1]?.outputTokens ?? 0))[0]?.[0];
+      reportUsage(this, {
+        inputTokens: (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
+        cacheReadTokens: u.cache_read_input_tokens ?? 0,
+        outputTokens: u.output_tokens ?? 0,
+        model: realModel,
+        // Equivalente na API que o CLI calcula (a assinatura não cobra por token)
+        costUsd: typeof json.total_cost_usd === 'number' ? json.total_cost_usd : undefined,
+      });
       if (!text) throw new Error('Claude Code sem resposta');
       return text;
     } finally {

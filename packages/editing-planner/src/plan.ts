@@ -65,6 +65,8 @@ export function normalizeEdit(edit: ClipEdit, duration: number, settings: JobSet
     title: edit.title,
     description: edit.description,
     coverText: edit.coverText ?? null,
+    tags: edit.tags ?? [],
+    thumbnails: (edit.thumbnails ?? []).map((t) => ({ ...t, at: Math.min(t.at, Math.max(0, duration - 0.5)) })),
     hashtags: edit.hashtags ?? [],
   };
 }
@@ -273,7 +275,7 @@ export function heuristicEdit(args: {
     }
   }
   return normalizeEdit(
-    { clipIndex: args.clipIndex, illustrations: [], zooms, overlays: overlays.sort((a, b) => a.at - b.at), sfx: sfx.sort((a, b) => a.at - b.at), emphasisWords, hashtags: [], shots: [] },
+    { clipIndex: args.clipIndex, illustrations: [], zooms, overlays: overlays.sort((a, b) => a.at - b.at), sfx: sfx.sort((a, b) => a.at - b.at), emphasisWords, tags: [], thumbnails: [], hashtags: [], shots: [] },
     duration,
     settings,
   );
@@ -315,6 +317,8 @@ export interface ResolvedEdit {
   description?: string;
   /** Texto curto sugerido para a capa do Short. */
   coverText?: string | null;
+  tags: string[];
+  thumbnails: { at: number; text: string }[];
   hashtags: string[];
   warnings: string[];
 }
@@ -373,6 +377,8 @@ export function resolveEdit(edit: ClipEdit, library: LibraryIndex, seed: string)
     title: edit.title,
     description: edit.description,
     coverText: edit.coverText ?? null,
+    tags: edit.tags ?? [],
+    thumbnails: edit.thumbnails ?? [],
     hashtags: edit.hashtags ?? [],
     warnings,
   };

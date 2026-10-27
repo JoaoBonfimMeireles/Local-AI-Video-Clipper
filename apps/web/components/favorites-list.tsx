@@ -7,9 +7,10 @@ import type { Favorite } from '@clipper/shared';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { ClipAssets, LanguageDownloads, PostText, revisionActive, ReviseBox, RevisionBanner, type RevisionStatus } from '@/components/job-detail';
+import { ClipAssets, LanguageDownloads, PostText, YoutubeKit, revisionActive, ReviseBox, RevisionBanner, type RevisionStatus } from '@/components/job-detail';
 import { api, fileUrl } from '@/lib/client';
 import { cn } from '@/lib/utils';
+import { SpeedPicker } from '@/components/speed-picker';
 
 interface FavoritesResponse {
   favorites: Favorite[];
@@ -156,10 +157,12 @@ function FavoriteCard({ fav, revision, onRemove, onRevise }: { fav: Favorite; re
             {fav.videoName}
           </Link>
         </p>
+        <SpeedPicker />
         {(fav.description || fav.hashtags.length > 0) && <PostText clip={fav} />}
         {editAction === null && <ClipAssets key={fav.metadataPath} metadataPath={fav.metadataPath} />}
+        <YoutubeKit key={`y${fav.metadataPath}`} metadataPath={fav.metadataPath} />
         <LanguageDownloads key={`l${fav.metadataPath}`} metadataPath={fav.metadataPath} />
-        {revision && <RevisionBanner rev={revision} />}
+        {revision && <RevisionBanner rev={revision} onRetried={onRevise} />}
         {editAction === undefined ? null : editAction ? <EditButton action={editAction} /> : !revising && <ReviseBox endpoint={`/api/favorites/${fav.id}/revise`} onQueued={onRevise} />}
         <div className="flex flex-wrap gap-1.5 pt-1">
           <a className={buttonVariants({ size: 'sm' })} href={fileUrl(fav.videoPath, true)}>

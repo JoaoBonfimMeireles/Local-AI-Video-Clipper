@@ -1,5 +1,5 @@
 // Tipos compartilhados entre UI, API e worker. Este arquivo não pode importar módulos Node.
-import type { CleanSpec, CleanStems } from './clean';
+import type { CleanSpec, CleanStems, UpscaleModel } from './clean';
 import type { CuriosityIdea, CuriosityTemplateKey } from './curiosity';
 
 export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
@@ -35,13 +35,49 @@ export type HwAccel = 'none' | 'nvenc';
 export interface ManualEdit {
   segments: { start: number; end: number; label?: string | null }[];
   shots: { at: number; duration: number; type: 'focus' | 'wide'; focusX: number; focusY: number; scale: number }[];
-  zooms: { at: number; duration: number; scale: number; focusX: number; focusY: number }[];
+  /** target cam = a câmera (caixa de cima do enquadramento) ocupa a tela toda durante o zoom. */
+  zooms: { at: number; duration: number; scale: number; focusX: number; focusY: number; target?: 'screen' | 'cam' }[];
   overlays: { type: 'meme' | 'image'; category: string; file: string; at: number; duration: number; position: 'center' | 'top' | 'bottom' | 'top-left' | 'top-right'; scale: number; audioMode: 'meme' | 'video' | 'both' }[];
   sfx: { category: string; file: string; at: number; volume: number; duration?: number }[];
   /** Layout facecam: 1 = como a IA deixou; > 1 aproxima o rosto (recorta mais apertado a câmera). */
   camZoom?: number;
   /** Enquadramento manual por trechos de tempo: substitui shots/facecam da IA quando presente. */
   frames?: ManualFrame[];
+  /** Textos por cima do vídeo (tempo do plano). */
+  texts?: ManualText[];
+  /** Cor sólida (#RRGGBB) no lugar do fundo desfocado quando o conteúdo aparece inteiro; null = desfocado. */
+  background?: string | null;
+  /** Logo do canal (a mesma do Editor de vídeo) durante o corte todo. */
+  logo?: ManualLogo | null;
+}
+
+/**
+ * Texto sobreposto. Centro (x, y) em frações do quadro de saída; size = tamanho da fonte (em) como fração da
+ * largura do quadro; outline = espessura da borda como fração do tamanho. Sem at/end = o corte inteiro.
+ * Medidas em @clipper/shared (manual.ts), iguais na prévia e no render.
+ */
+export interface ManualText {
+  text: string;
+  at?: number;
+  end?: number;
+  x: number;
+  y: number;
+  size: number;
+  color: string;
+  outline: number;
+  outlineColor: string;
+  /** Caixa (fundo) atrás do texto. */
+  box: boolean;
+  boxColor: string;
+  boxOpacity: number;
+}
+
+/** Logo: centro (x, y) em frações do quadro de saída e altura (fração da altura do quadro). */
+export interface ManualLogo {
+  file: string;
+  x: number;
+  y: number;
+  size: number;
 }
 
 /** Caixa no quadro ORIGINAL, em frações (0-1). */
@@ -65,6 +101,22 @@ export interface ManualFrame {
   box: FrameBox;
   box2?: FrameBox;
   topRatio?: number;
+  /**
+   * Formato da câmera no modo split: rect (padrão) = bloco de cima; circle = rosto num círculo por cima do conteúdo,
+   * que ocupa a tela toda (topRatio vira o tamanho do círculo e alignTop a posição; ver manualCircle).
+   */
+  camShape?: 'rect' | 'circle';
+  /** Moldura do bloco de cima (no círculo, o aro) e do de baixo: borda e cantos arredondados. */
+  styleTop?: BlockStyle | null;
+  styleBottom?: BlockStyle | null;
+  /** Altura do bloco de baixo (fração da tela); menor que o resto = sobra embaixo com a cor de fundo. */
+  bottomRatio?: number;
+  /** Melhorar qualidade (Real-ESRGAN local) da área de cima (box) / de baixo (box2): o modelo; vazio = desligado. */
+  enhanceTop?: UpscaleModel | null;
+  enhanceBottom?: UpscaleModel | null;
+  /** Preenchidos pelo worker antes do render (a rota descarta): a área já recortada e melhorada, do tamanho do enquadramento. */
+  enhancedTop?: EnhancedArea;
+  enhancedBottom?: EnhancedArea;
   /** Encaixe do bloco de cima no modo split (padrão: preencher). */
   fitTop?: 'cover' | 'blur';
   /** Posição do conteúdo dentro do bloco quando ele aparece inteiro (0 = esquerda/topo, 1 = direita/base; padrão 0,5). */
@@ -73,6 +125,20 @@ export interface ManualFrame {
   /** Segundo conteúdo ao lado, no bloco de cima / de baixo (no modo "Um quadro", sideTop vale para a tela). */
   sideTop?: FrameSide | null;
   sideBottom?: FrameSide | null;
+}
+
+/** Vídeo da área melhorada (começa no início do enquadramento) e o tamanho dele em px. */
+export interface EnhancedArea {
+  file: string;
+  w: number;
+  h: number;
+}
+
+/** Borda (espessura e raio em fração da largura da tela; 0 = sem) e cor da moldura de um bloco. */
+export interface BlockStyle {
+  border: number;
+  color: string;
+  radius: number;
 }
 
 /**
@@ -328,6 +394,33 @@ export interface JobResult {
   cleanOutput?: string;
   /** Limpar vídeo: faixas separadas para baixar. */
   cleanStems?: CleanStems;
+}
+
+/** Uso de IA agregado (por etapa + modelo, por job ou por período). Tokens como o provedor informou. */
+export interface AiUsageTotals {
+  calls: number;
+  /** Entrada total, incluindo a parte lida do cache. */
+  inputTokens: number;
+  /** Quanto da entrada veio do cache (mais barato / pesa menos no limite). */
+  cacheReadTokens: number;
+  outputTokens: number;
+  /** Custo estimado em US$ pelos preços públicos (para assinatura/gratuito: o equivalente na API, não cobrado). */
+  costUsd: number;
+  /** true quando nada foi cobrado por token (plano gratuito, local ou assinatura). */
+  free: boolean;
+  /** Chamadas em que o provedor não devolveu contagem de tokens. */
+  unmeasuredCalls: number;
+}
+
+export interface AiUsageEntry extends AiUsageTotals {
+  step: string;
+  provider: string;
+  model: string;
+}
+
+export interface JobAiUsage {
+  total: AiUsageTotals;
+  entries: AiUsageEntry[];
 }
 
 export interface JobLog {

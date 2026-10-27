@@ -4,8 +4,9 @@
 // copia o resultado para data/input e abre o Painel com ele selecionado.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowRight, AudioLines, Star, Download, Eraser, Film, Music, VideoOff, Loader2, Pause, Play, Plus, RefreshCw, Scissors, Square, Subtitles, Trash2, UploadCloud, X } from 'lucide-react';
-import { DEFAULT_CLEAN_SPEC, formatBytes, formatTimestamp, keptSegments, type CleanBox, type CleanSpec, type Job } from '@clipper/shared';
+import { ArrowRight, AudioLines, Sparkles, Star, Download, Eraser, Film, Music, VideoOff, Loader2, Pause, Play, Plus, RefreshCw, Scissors, Square, Subtitles, Trash2, UploadCloud, X } from 'lucide-react';
+import { DEFAULT_CLEAN_SPEC, formatBytes, formatTimestamp, keptSegments, UPSCALE_MODELS, type CleanBox, type CleanSpec, type Job } from '@clipper/shared';
+import { EnhanceCompare, type EnhanceShot } from '@/components/enhance-compare';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -17,6 +18,7 @@ import { Switch } from '@/components/ui/switch';
 import { JobStatusBadge } from '@/components/job-status';
 import { api, fileUrl, uploadFile, usePolling } from '@/lib/client';
 import { cn } from '@/lib/utils';
+import { SpeedPicker } from '@/components/speed-picker';
 
 interface InputFile {
   name: string;
@@ -32,7 +34,15 @@ const STEP_LABEL: Record<string, string> = {
   music: 'Separando a voz da música',
   final: 'Finalizando (logo, bordas e áudio)',
   stems: 'Separando as faixas para baixar',
+  upscale_extract: 'Melhorar qualidade: extraindo os quadros',
+  upscale_encode: 'Melhorar qualidade: remontando o vídeo com o áudio',
 };
+/** "upscale 120/900" → "Melhorando a qualidade (quadro 120 de 900)". */
+function stepLabel(step: string): string {
+  const m = /^upscale (\d+)\/(\d+)$/.exec(step);
+  if (m) return `Melhorando a qualidade na GPU (quadro ${m[1]} de ${m[2]})`;
+  return STEP_LABEL[step] ?? step;
+}
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 
 export function CleanStudio() {
@@ -40,6 +50,34 @@ export function CleanStudio() {
   const [files, setFiles] = useState<InputFile[] | null>(null);
   const [file, setFile] = useState('');
   const [opts, setOpts] = useState<Options>(DEFAULT_CLEAN_SPEC);
+  // Momento da prévia (para comparar as versões do "Melhorar qualidade" nesse quadro)
+  const previewTime = useRef(0);
+  const [shot, setShot] = useState<EnhanceShot | null>(null);
+  // Vídeo e resolução da comparação mostrada: mudou a resolução, gera de novo no mesmo quadro
+  const [shotFor, setShotFor] = useState('');
+  const compareKey = `${file}|${opts.upscaleTo}`;
+  const [comparing, setComparing] = useState(false);
+  const [compareError, setCompareError] = useState<string | null>(null);
+  async function compare() {
+    if (!file || !opts.upscaleTo) return;
+    setComparing(true);
+    setCompareError(null);
+    try {
+      setShotFor(compareKey);
+      setShot(await api<EnhanceShot>('/api/clean/enhance-preview', { method: 'POST', body: JSON.stringify({ file, at: previewTime.current, target: opts.upscaleTo }) }));
+    } catch (e) {
+      setShot(null);
+      setCompareError((e as Error).message);
+    } finally {
+      setComparing(false);
+    }
+  }
+  useEffect(() => {
+    if (!shot || comparing || shotFor === compareKey) return;
+    if (file && opts.upscaleTo && shotFor.startsWith(`${file}|`)) void compare();
+    else setShot(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compareKey]);
   const [upload, setUpload] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -127,7 +165,7 @@ export function CleanStudio() {
   const jobs = data?.jobs ?? [];
   const current = jobs.find((j) => j.id === jobId) ?? null;
   const running = jobs.find((j) => j.status === 'pending' || j.status === 'processing');
-  const nothingOn = !opts.cuts.length && !opts.logos.length && !opts.trimSilence && !opts.removeMusic && !opts.removeSubtitles && !opts.cropBlackBars && !opts.denoise && !opts.normalizeAudio && !opts.exportStems;
+  const nothingOn = !opts.cuts.length && !opts.logos.length && !opts.trimSilence && !opts.removeMusic && !opts.removeSubtitles && !opts.cropBlackBars && !opts.denoise && !opts.normalizeAudio && !opts.exportStems && !opts.upscaleTo;
 
   return (
     <div className="space-y-6">
@@ -181,7 +219,7 @@ export function CleanStudio() {
                 <input ref={fileInput} type="file" accept="video/*,.mkv" className="hidden" onChange={(e) => handleUpload(e.target.files)} />
               </div>
               {!files && <Skeleton className="aspect-video w-full" />}
-              {file && <Marker key={file} videoName={file} opts={opts} set={set} />}
+              {file && <Marker key={file} videoName={file} opts={opts} set={set} onTime={(t) => (previewTime.current = t)} />}
             </CardContent>
           </Card>
         </div>
@@ -209,6 +247,55 @@ export function CleanStudio() {
               <Tool title="Normalizar volume" desc="Volume padrão de redes sociais (-14 LUFS)" checked={opts.normalizeAudio} onChange={(v) => set('normalizeAudio', v)} />
               <Tool title="Separar em faixas para baixar" desc="Gera também só a voz, só a música, o vídeo sem som e os trechos cortados (usa a IA Demucs)" checked={opts.exportStems} onChange={(v) => set('exportStems', v)} />
               <Tool title="Recortar bordas pretas" desc="Tira faixas pretas em volta da imagem" checked={opts.cropBlackBars} onChange={(v) => set('cropBlackBars', v)} />
+              <Tool title="Melhorar qualidade (aumentar resolução)" desc="IA Real-ESRGAN na sua placa de vídeo: deixa vídeos borrados (ex.: 144p) mais nítidos" checked={!!opts.upscaleTo} onChange={(v) => set('upscaleTo', v ? 480 : 0)}>
+                {!!opts.upscaleTo && (
+                  <div className="space-y-2 pt-2">
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <Label className="text-xs">Resolução</Label>
+                        <Select value={String(opts.upscaleTo)} onChange={(e) => set('upscaleTo', Number(e.target.value) as Options['upscaleTo'])} className="h-8 text-xs">
+                          <option value="480">Até 480p</option>
+                          <option value="720">Até 720p</option>
+                          <option value="1080">Até 1080p</option>
+                        </Select>
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs">Modelo</Label>
+                        <Select value={opts.upscaleModel ?? 'realistic'} onChange={(e) => set('upscaleModel', e.target.value as Options['upscaleModel'])} className="h-8 text-xs">
+                          {UPSCALE_MODELS.map((m) => (
+                            <option key={m.value} value={m.value}>
+                              {m.label}
+                            </option>
+                          ))}
+                        </Select>
+                      </div>
+                    </div>
+                    {/* Comparar antes de iniciar: o quadro atual da prévia na resolução escolhida, em cada versão */}
+                    <div className="space-y-2 rounded-md border border-primary/30 bg-primary/5 p-2 text-xs">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button size="sm" variant="outline" className="h-7" disabled={!file || comparing} onClick={compare}>
+                          {comparing ? <Loader2 className="animate-spin" /> : <Sparkles />} {comparing ? 'Gerando as 4 versões… (até 1 min)' : 'Comparar versões neste momento'}
+                        </Button>
+                        <span className="text-muted-foreground">Pause a prévia no quadro que quer ver (de preferência com um rosto).</span>
+                      </div>
+                      {compareError && <p className="text-destructive">{compareError}</p>}
+                      {shot && !comparing && (
+                        <EnhanceCompare
+                          shot={shot}
+                          value={opts.upscaleModel ?? 'realistic'}
+                          onPick={(m) => (m ? set('upscaleModel', m) : set('upscaleTo', 0))}
+                        />
+                      )}
+                    </div>
+                    <p className="flex gap-1.5 rounded-md bg-muted px-2 py-1.5 text-xs text-muted-foreground">
+                      <Sparkles className="mt-0.5 size-3.5 shrink-0" />
+                      <span>
+                        Roda 100% no seu PC e não gasta tokens de IA. Leva alguns minutos (cada quadro passa pela IA). A IA pode &ldquo;inventar&rdquo; detalhes em rostos ou textos muito pequenos — confira o resultado.
+                      </span>
+                    </p>
+                  </div>
+                )}
+              </Tool>
               <div className="pt-3">
                 <Button className="w-full" size="lg" disabled={!file || nothingOn || !!running} onClick={start}>
                   {running ? <Loader2 className="animate-spin" /> : <Eraser />}
@@ -279,7 +366,7 @@ function Tool({ title, desc, checked, onChange, readOnly, children }: { title: s
 }
 
 /** Player do original: marca cortes na linha do tempo e desenha logo/faixa da legenda sobre o vídeo. */
-function Marker({ videoName, opts, set }: { videoName: string; opts: Options; set: <K extends keyof Options>(k: K, v: Options[K]) => void }) {
+function Marker({ videoName, opts, set, onTime }: { videoName: string; opts: Options; set: <K extends keyof Options>(k: K, v: Options[K]) => void; onTime?: (t: number) => void }) {
   const video = useRef<HTMLVideoElement>(null);
   const stage = useRef<HTMLDivElement>(null);
   const [src, setSrc] = useState<{ path?: string; error?: string } | null>(null);
@@ -381,7 +468,11 @@ function Marker({ videoName, opts, set }: { videoName: string; opts: Options; se
               setDuration(e.currentTarget.duration);
               if (e.currentTarget.videoWidth) setAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight);
             }}
-            onTimeUpdate={(e) => setNow(e.currentTarget.currentTime)}
+            onTimeUpdate={(e) => {
+              setNow(e.currentTarget.currentTime);
+              onTime?.(e.currentTarget.currentTime);
+            }}
+            onSeeked={(e) => onTime?.(e.currentTarget.currentTime)}
             onPlay={() => setPlaying(true)}
             onPause={() => setPlaying(false)}
             onClick={() => !draw && (video.current?.paused ? video.current.play() : video.current?.pause())}
@@ -427,6 +518,7 @@ function Marker({ videoName, opts, set }: { videoName: string; opts: Options; se
         <span className="font-mono text-xs tabular-nums text-muted-foreground">
           {formatTimestamp(now, true)} / {formatTimestamp(duration)}
         </span>
+        <SpeedPicker />
         <Button size="sm" variant={pending === null ? 'outline' : 'destructive'} onClick={mark} title="Atalho: tecla I">
           <Scissors />
           {pending === null ? 'Início do corte' : `Fim do corte (desde ${formatTimestamp(pending, true)})`}
@@ -507,7 +599,7 @@ function ResultCard({ job, sending, onSend, onDelete, onNew, inputDir }: { job: 
         {active && (
           <div className="space-y-1.5">
             <div className="flex justify-between text-sm">
-              <span>{job.status === 'pending' ? 'Na fila…' : (STEP_LABEL[job.step] ?? job.step)}</span>
+              <span>{job.status === 'pending' ? 'Na fila…' : stepLabel(job.step)}</span>
               <span className="tabular-nums text-muted-foreground">{Math.round(job.progress * 100)}%</span>
             </div>
             <Progress value={job.progress * 100} />
@@ -579,6 +671,7 @@ function ResultCard({ job, sending, onSend, onDelete, onNew, inputDir }: { job: 
               >
                 {both ? <Pause /> : <Play />} {both ? 'Parar os dois' : 'Tocar os dois'}
               </Button>
+              <SpeedPicker />
               <a href={fileUrl(out, true)}>
                 <Button variant="outline">
                   <Download /> Baixar

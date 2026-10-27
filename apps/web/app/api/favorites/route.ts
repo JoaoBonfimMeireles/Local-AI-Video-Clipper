@@ -64,8 +64,10 @@ export async function POST(req: Request) {
       const sbv = copy(path.join(srcDir, f.sbv), `clip.${lang}.sbv`);
       if (srt && sbv) subtitles[lang] = { srt: path.basename(srt), sbv: path.basename(sbv) };
     }
+    // 3 capas do teste A/B de miniaturas
+    const thumbnails = ((meta.files?.thumbnails ?? []) as string[]).map((f, i) => (copy(path.join(srcDir, f), `clip.thumb${i + 1}.jpg`) ? `clip.thumb${i + 1}.jpg` : null)).filter(Boolean);
     meta.favorite = { id, jobId, clipIndex, videoName: job.videoName, favoritedAt: new Date().toISOString() };
-    meta.files = { ...(meta.files ?? {}), video: 'clip.mp4', videoZh, thumbnail: 'clip.jpg', srt: srtPath ? { [Object.keys(meta.files?.srt ?? { pt: '' })[0]]: 'clip.srt' } : {}, subtitles };
+    meta.files = { ...(meta.files ?? {}), video: 'clip.mp4', videoZh, thumbnail: 'clip.jpg', thumbnails, srt: srtPath ? { [Object.keys(meta.files?.srt ?? { pt: '' })[0]]: 'clip.srt' } : {}, subtitles };
     const metadataPath = path.join(dir, 'clip.json');
     fs.writeFileSync(metadataPath, JSON.stringify(meta, null, 2), 'utf8');
     const favorite = insertFavorite({

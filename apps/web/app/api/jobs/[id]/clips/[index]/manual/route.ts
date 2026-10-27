@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
+import { UPSCALE_MODEL_IDS } from '@clipper/shared';
 import { createJob, dataPaths, getJob, isInside, listClips } from '@clipper/shared/server';
 import { badRequest } from '@/lib/validation';
 
@@ -26,10 +27,19 @@ const Side = z.object({
   align: Align.optional(),
 });
 
+const Color = z.string().regex(/^#[0-9a-fA-F]{6}$/);
+/** Logo: só a do Editor de vídeo (data/meme-studio) ou da biblioteca de imagens/memes. */
+const LogoFile = z
+  .string()
+  .max(1000)
+  .refine((f) => [path.join(dataPaths.root, 'meme-studio'), dataPaths.images, dataPaths.memes].some((d) => isInside(d, path.resolve(f))) && fs.existsSync(f), 'Logo não encontrada');
+
+const Style = z.object({ border: z.coerce.number().min(0).max(0.1), color: Color, radius: z.coerce.number().min(0).max(0.5) });
+
 const ManualEditSchema = z.object({
   segments: z.array(z.object({ start: t, end: t, label: z.string().max(60).nullish() })).min(1).max(8),
   shots: z.array(z.object({ at: t, duration: z.coerce.number().min(0.3).max(600), type: z.enum(['focus', 'wide']), focusX: frac, focusY: frac, scale: z.coerce.number().min(1).max(2.5) })).max(80),
-  zooms: z.array(z.object({ at: t, duration: z.coerce.number().min(0.3).max(30), scale: z.coerce.number().min(1).max(2), focusX: frac, focusY: frac })).max(80),
+  zooms: z.array(z.object({ at: t, duration: z.coerce.number().min(0.3).max(30), scale: z.coerce.number().min(1).max(2), focusX: frac, focusY: frac, target: z.enum(['screen', 'cam']).optional() })).max(80),
   overlays: z
     .array(
       z.object({
@@ -56,6 +66,12 @@ const ManualEditSchema = z.object({
         box: Box,
         box2: Box.optional(),
         topRatio: z.coerce.number().min(0.2).max(0.8).optional(),
+        camShape: z.enum(['rect', 'circle']).optional(),
+        styleTop: Style.nullable().optional(),
+        styleBottom: Style.nullable().optional(),
+        bottomRatio: z.coerce.number().min(0.15).max(0.8).optional(),
+        enhanceTop: z.enum(UPSCALE_MODEL_IDS).nullable().optional(),
+        enhanceBottom: z.enum(UPSCALE_MODEL_IDS).nullable().optional(),
         fitTop: z.enum(['cover', 'blur']).optional(),
         alignTop: Align.optional(),
         alignBottom: Align.optional(),
@@ -65,6 +81,27 @@ const ManualEditSchema = z.object({
     )
     .max(40)
     .optional(),
+  texts: z
+    .array(
+      z.object({
+        text: z.string().max(300),
+        at: t.optional(),
+        end: t.optional(),
+        x: frac,
+        y: frac,
+        size: z.coerce.number().min(0.02).max(0.3),
+        color: Color,
+        outline: z.coerce.number().min(0).max(0.3),
+        outlineColor: Color,
+        box: z.boolean(),
+        boxColor: Color,
+        boxOpacity: z.coerce.number().min(0).max(1),
+      }),
+    )
+    .max(20)
+    .optional(),
+  background: Color.nullable().optional(),
+  logo: z.object({ file: LogoFile, x: frac, y: frac, size: z.coerce.number().min(0.02).max(0.5) }).nullable().optional(),
 });
 
 /** Cria um job de ajuste com a edição MANUAL do corte (sem IA): o worker só renderiza o plano enviado. */

@@ -153,6 +153,30 @@ export const ClipEditSchema = z.object({
   description: cappedText(1500).optional(),
   /** Texto curto para a capa (thumbnail) do Short. */
   coverText: cappedText(80).nullish(),
+  /** Tags do YouTube (SEO): palavras-chave sem #, no máximo ~480 caracteres somados (limite do YouTube é 500). */
+  tags: z
+    .array(cappedText(80, 1))
+    .max(40)
+    .default([])
+    .transform((tags) => {
+      const out: string[] = [];
+      const seen = new Set<string>();
+      let total = 0;
+      for (const raw of tags) {
+        const t = raw.replace(/^#+/, '').replace(/[<>,]/g, ' ').replace(/\s+/g, ' ').trim();
+        const k = t.toLowerCase();
+        if (!t || seen.has(k) || total + t.length + 1 > 480) continue;
+        seen.add(k);
+        out.push(t);
+        total += t.length + 1;
+      }
+      return out;
+    }),
+  /** 3 capas diferentes para o teste A/B de miniaturas do YouTube: momento do corte (s) + texto exagerado. */
+  thumbnails: z
+    .array(z.object({ at: z.coerce.number().min(0), text: cappedText(60, 1) }))
+    .transform((a) => a.slice(0, 3))
+    .default([]),
   hashtags: z
     .array(cappedText(60, 1))
     .max(20)

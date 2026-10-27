@@ -8,7 +8,10 @@ import {
   type Clip,
   type ClipStatus,
   type Favorite,
+  type AiUsageEntry,
+  type AiUsageTotals,
   type Job,
+  type JobAiUsage,
   type JobLog,
   type JobResult,
   type JobSettings,
@@ -88,6 +91,24 @@ CREATE TABLE IF NOT EXISTS favorites (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_favorites_date ON favorites(favorited_at);
+
+-- Uso de IA por chamada (sem FK: o total da semana sobrevive a excluir o job)
+CREATE TABLE IF NOT EXISTS ai_usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  step TEXT NOT NULL DEFAULT '',
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  free INTEGER NOT NULL DEFAULT 0,
+  measured INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_job ON ai_usage(job_id);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_ts ON ai_usage(ts);
 
 CREATE TABLE IF NOT EXISTS app_settings (
   key TEXT PRIMARY KEY,
@@ -307,6 +328,73 @@ export function addJobLog(jobId: string, level: JobLog['level'], message: string
   getDb()
     .prepare('INSERT INTO job_logs (job_id, ts, level, message) VALUES (?, ?, ?, ?)')
     .run(jobId, now(), level, message.slice(0, 4000));
+}
+
+// ---------------- Uso de IA ----------------
+
+export interface AiUsageRecord {
+  jobId: string;
+  step: string;
+  provider: string;
+  model: string;
+  inputTokens: number;
+  cacheReadTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  free: boolean;
+  /** false quando o provedor não devolveu a contagem de tokens. */
+  measured: boolean;
+}
+
+export function recordAiUsage(r: AiUsageRecord): void {
+  getDb()
+    .prepare(
+      `INSERT INTO ai_usage (job_id, ts, step, provider, model, input_tokens, cache_read_tokens, output_tokens, cost_usd, free, measured)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(r.jobId, now(), r.step, r.provider, r.model, r.inputTokens, r.cacheReadTokens, r.outputTokens, r.costUsd, r.free ? 1 : 0, r.measured ? 1 : 0);
+}
+
+const USAGE_COLS = `COUNT(*) AS calls, SUM(input_tokens) AS input, SUM(cache_read_tokens) AS cache, SUM(output_tokens) AS output,
+  SUM(cost_usd) AS cost, MIN(free) AS free, SUM(1 - measured) AS unmeasured`;
+interface UsageRow {
+  calls: number;
+  input: number | null;
+  cache: number | null;
+  output: number | null;
+  cost: number | null;
+  free: number | null;
+  unmeasured: number | null;
+}
+const toTotals = (r: UsageRow): AiUsageTotals => ({
+  calls: r.calls,
+  inputTokens: r.input ?? 0,
+  cacheReadTokens: r.cache ?? 0,
+  outputTokens: r.output ?? 0,
+  costUsd: r.cost ?? 0,
+  free: r.free !== 0,
+  unmeasuredCalls: r.unmeasured ?? 0,
+});
+
+/** Uso de IA de um job: total e por etapa + modelo (null se o job não chamou IA). */
+export function getJobAiUsage(jobId: string): JobAiUsage | null {
+  const db = getDb();
+  const total = db.prepare(`SELECT ${USAGE_COLS} FROM ai_usage WHERE job_id = ?`).get(jobId) as UsageRow;
+  if (!total.calls) return null;
+  const rows = db
+    .prepare(`SELECT step, provider, model, ${USAGE_COLS} FROM ai_usage WHERE job_id = ? GROUP BY step, provider, model ORDER BY MIN(id)`)
+    .all(jobId) as (UsageRow & { step: string; provider: string; model: string })[];
+  return { total: toTotals(total), entries: rows.map((r): AiUsageEntry => ({ step: r.step, provider: r.provider, model: r.model, ...toTotals(r) })) };
+}
+
+/** Uso de IA de todos os jobs desde uma data (ISO), por provedor + modelo. */
+export function getAiUsageSince(sinceIso: string): JobAiUsage {
+  const db = getDb();
+  const total = toTotals(db.prepare(`SELECT ${USAGE_COLS} FROM ai_usage WHERE ts >= ?`).get(sinceIso) as UsageRow);
+  const rows = db
+    .prepare(`SELECT provider, model, ${USAGE_COLS} FROM ai_usage WHERE ts >= ? GROUP BY provider, model ORDER BY SUM(input_tokens + output_tokens) DESC`)
+    .all(sinceIso) as (UsageRow & { provider: string; model: string })[];
+  return { total, entries: rows.map((r): AiUsageEntry => ({ step: '', provider: r.provider, model: r.model, ...toTotals(r) })) };
 }
 
 export function listJobLogs(jobId: string, afterId = 0, limit = 500): JobLog[] {

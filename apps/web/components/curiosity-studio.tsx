@@ -27,6 +27,7 @@ import { JobStatusBadge, stepLabel } from '@/components/job-status';
 import { NarratorAvatar } from '@/components/narrator-avatar';
 import { api, fileUrl, uploadFile, usePolling } from '@/lib/client';
 import { cn } from '@/lib/utils';
+import { SpeedPicker } from '@/components/speed-picker';
 
 interface InputFile {
   name: string;
@@ -743,6 +744,7 @@ function IdeaEditor({
             <Button size="sm" variant="outline" onClick={speak} title="Ouvir só a narração (voz do navegador)">
               <Mic />
             </Button>
+            <SpeedPicker />
           </div>
           <p className="text-center text-[11px] text-muted-foreground">
             {clipTime !== null ? `${clipTime.toFixed(1)}s de ${total.toFixed(1)}s` : `no vídeo: ${formatTimestamp(now)}`}

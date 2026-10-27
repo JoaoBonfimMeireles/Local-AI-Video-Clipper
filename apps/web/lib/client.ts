@@ -73,3 +73,20 @@ export function uploadFile(file: File, onProgress: (p: number) => void): Promise
     xhr.send(file);
   });
 }
+
+/** Upload de logo/imagem/som para data/meme-studio/assets (XHR, com progresso). */
+export function uploadMemeAsset(file: File, onProgress: (p: number) => void): Promise<{ path: string; kind: string }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', '/api/memes/assets');
+    xhr.setRequestHeader('x-file-name', encodeURIComponent(file.name));
+    xhr.setRequestHeader('content-type', 'application/octet-stream');
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+    xhr.onload = () => {
+      const body = JSON.parse(xhr.responseText || '{}');
+      xhr.status < 300 ? resolve(body) : reject(new Error(body.error ?? `HTTP ${xhr.status}`));
+    };
+    xhr.onerror = () => reject(new Error('Falha de rede no upload'));
+    xhr.send(file);
+  });
+}
