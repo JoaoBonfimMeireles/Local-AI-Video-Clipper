@@ -11,7 +11,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const shim = path.join(root, 'scripts', 'exfat-fs-shim.cjs').replace(/\\/g, '/');
 const nextBin = createRequire(import.meta.url).resolve('next/dist/bin/next');
 
-const env = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require "${shim}"`.trim() };
+// O build do webpack passa de 4 GB (limite padrão do heap do Node): libera até 8 GB só para ele.
+const heap = process.argv[2] === 'build' ? ' --max-old-space-size=8192' : '';
+const env = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require "${shim}"${heap}`.trim() };
 const child = spawn(process.execPath, [nextBin, ...process.argv.slice(2)], { stdio: 'inherit', env, cwd: root });
 child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
 // No dev, pré-compila as páginas em segundo plano para o primeiro clique em cada tela não travar.

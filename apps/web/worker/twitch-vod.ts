@@ -34,7 +34,10 @@ const YTDLP_ERRORS: [RegExp, string][] = [
 ];
 
 async function ytdlp(args: string[], opts: { signal?: AbortSignal; timeoutMs?: number; onStderrLine?: (l: string) => void } = {}) {
-  const r = await runProcess(resolvePythonBinary(), ['-m', 'yt_dlp', '--no-warnings', '--no-playlist', ...args], {
+  // Retentativas: VODs longos têm milhares de fragmentos e, no Windows, o antivírus às vezes trava o arquivo
+  // temporário de um deles por um instante (falha de renomear/abrir). Sem isso um soluço derruba o job todo.
+  const retries = ['--retries', '10', '--fragment-retries', '30', '--file-access-retries', '10', '--retry-sleep', 'fragment:exp=1:20'];
+  const r = await runProcess(resolvePythonBinary(), ['-m', 'yt_dlp', '--no-warnings', '--no-playlist', ...retries, ...args], {
     env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     signal: opts.signal,
     timeoutMs: opts.timeoutMs ?? 120_000,
@@ -43,9 +46,18 @@ async function ytdlp(args: string[], opts: { signal?: AbortSignal; timeoutMs?: n
   if (r.code !== 0) {
     const err = r.stderrTail.trim();
     const known = YTDLP_ERRORS.find(([re]) => re.test(err));
-    throw new Error(known ? known[1] : `yt-dlp falhou: ${err.split('\n').pop()?.slice(0, 300)}`);
+    throw new Error(known ? known[1] : `yt-dlp falhou: ${ytdlpErrorText(err)}`);
   }
   return r.stdout;
+}
+
+/** A linha "ERROR: ..." do yt-dlp; se a mensagem vier vazia (exceção sem texto), junta as linhas anteriores. */
+function ytdlpErrorText(stderr: string) {
+  const lines = stderr.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const i = lines.findLastIndex((l) => l.startsWith('ERROR:'));
+  if (i < 0) return (lines.at(-1) ?? 'erro desconhecido').slice(0, 300);
+  const msg = lines[i].slice('ERROR:'.length).trim();
+  return (msg || lines.slice(Math.max(0, i - 3), i + 1).join(' | ') || 'erro sem mensagem').slice(0, 400);
 }
 
 export async function fetchVodMeta(url: string, signal?: AbortSignal): Promise<VodMeta> {
@@ -144,12 +156,19 @@ export async function downloadVodAudio(meta: VodMeta, dir: string, opts: { log: 
   fs.mkdirSync(dir, { recursive: true });
   const existing = fs.readdirSync(dir).find((f) => f.startsWith('audio.') && !f.endsWith('.part'));
   if (existing) return path.join(dir, existing);
-  await ytdlp(['-f', 'audio_only/bestaudio/worst', '--concurrent-fragments', '8', '--newline', '-o', path.join(dir, 'audio.%(ext)s'), meta.url], {
-    signal: opts.signal,
-    timeoutMs: 4 * 3600_000,
-  }).catch((e) => {
-    throw new Error(`Áudio: ${(e as Error).message}`);
-  });
+  const args = ['-f', 'audio_only/bestaudio/worst', '--ffmpeg-location', path.dirname(resolveBinary('ffmpeg')), '--concurrent-fragments', '8', '--newline', '-o', path.join(dir, 'audio.%(ext)s'), meta.url];
+  // Se cair no meio, tenta de novo: o yt-dlp retoma dos fragmentos já baixados (não começa do zero).
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await ytdlp(args, { signal: opts.signal, timeoutMs: 4 * 3600_000 });
+      break;
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (attempt >= 3 || opts.signal?.aborted || !msg.startsWith('yt-dlp falhou')) throw new Error(`Áudio: ${msg}`);
+      opts.log('warn', `Download do áudio caiu (${msg}); retomando de onde parou (tentativa ${attempt + 1}/3)…`);
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
   const file = fs.readdirSync(dir).find((f) => f.startsWith('audio.') && !f.endsWith('.part'));
   if (!file) throw new Error('Áudio: o yt-dlp não gerou o arquivo.');
   opts.log('info', `Áudio baixado (${(fs.statSync(path.join(dir, file)).size / 1e6).toFixed(0)} MB)`);
